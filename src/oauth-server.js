@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
+import { Client, LoggerLevel } from '@larksuiteoapi/node-sdk';
 
 const STATE_TTL_MS = 10 * 60 * 1_000;
 const USER_SCOPES = [
@@ -7,6 +8,14 @@ const USER_SCOPES = [
   'im:message:get_as_user',
   'offline_access',
 ];
+
+const NOOP_LOGGER = Object.freeze({
+  error() {},
+  warn() {},
+  info() {},
+  debug() {},
+  trace() {},
+});
 
 function sendText(response, statusCode, text) {
   response.writeHead(statusCode, { 'content-type': 'text/plain; charset=utf-8' });
@@ -20,10 +29,28 @@ function isCurrent(record) {
     && Date.now() - record.createdAt < STATE_TTL_MS;
 }
 
-export function createOAuthServer({ client, vault, redirectUri, port, stateStore }) {
+export function createSafeOAuthCodeExchanger({ appId, appSecret, domain, httpInstance }) {
+  const dedicatedClient = new Client({
+    appId,
+    appSecret,
+    domain,
+    httpInstance,
+    logger: NOOP_LOGGER,
+    loggerLevel: LoggerLevel.fatal,
+  });
+
+  return {
+    appId,
+    exchange({ code, redirectUri }) {
+      return dedicatedClient.accessToken.retrieveByAuthorizationCode({ code, redirectUri });
+    },
+  };
+}
+
+export function createOAuthServer({ codeExchanger, vault, redirectUri, port, stateStore }) {
   function feishuAuthorizationUrl(state) {
     const url = new URL('https://accounts.feishu.cn/open-apis/authen/v1/authorize');
-    url.searchParams.set('client_id', client.appId);
+    url.searchParams.set('client_id', codeExchanger.appId);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('redirect_uri', redirectUri);
     url.searchParams.set('scope', USER_SCOPES.join(' '));
@@ -85,7 +112,7 @@ export function createOAuthServer({ client, vault, redirectUri, port, stateStore
     }
 
     try {
-      const token = await client.accessToken.retrieveByAuthorizationCode({
+      const token = await codeExchanger.exchange({
         code,
         redirectUri,
       });

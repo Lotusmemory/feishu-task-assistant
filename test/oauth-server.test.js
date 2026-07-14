@@ -4,9 +4,12 @@ import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createJsonStore } from '../src/json-store.js';
-import { createOAuthServer } from '../src/oauth-server.js';
+import {
+  createOAuthServer,
+  createSafeOAuthCodeExchanger,
+} from '../src/oauth-server.js';
 
-async function fixture() {
+async function fixture({ exchangeError } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'kefu-oauth-'));
   const stateStore = createJsonStore({
     path: join(dir, 'state.json'),
@@ -14,19 +17,18 @@ async function fixture() {
   });
   const exchanges = [];
   const writes = [];
-  const client = {
+  const codeExchanger = {
     appId: 'cli_test',
-    accessToken: {
-      async retrieveByAuthorizationCode(params) {
-        exchanges.push(params);
-        return {
-          accessToken: 'access-value',
-          refreshToken: 'refresh-value',
-          expiresIn: 3_600,
-          refreshTokenExpiresIn: 2_592_000,
-          scope: 'search:message im:message:get_as_user offline_access',
-        };
-      },
+    async exchange(params) {
+      exchanges.push(params);
+      if (exchangeError) throw exchangeError;
+      return {
+        accessToken: 'access-value',
+        refreshToken: 'refresh-value',
+        expiresIn: 3_600,
+        refreshTokenExpiresIn: 2_592_000,
+        scope: 'search:message im:message:get_as_user offline_access',
+      };
     },
   };
   const vault = {
@@ -36,7 +38,7 @@ async function fixture() {
   };
   const redirectUri = 'https://example.com/oauth/callback';
   const oauth = createOAuthServer({
-    client,
+    codeExchanger,
     vault,
     redirectUri,
     port: 0,
@@ -52,6 +54,75 @@ async function fixture() {
     baseUrl: `http://127.0.0.1:${address.port}`,
   };
 }
+
+test('safe exchanger suppresses sensitive SDK transport failure output', async () => {
+  const secrets = {
+    code: 'sensitive-code-value',
+    appSecret: 'sensitive-app-secret',
+    redirectUri: 'https://example.com/oauth/callback?sensitive-query-marker',
+  };
+  const consoleOutput = [];
+  const loggerOutput = [];
+  let requestCount = 0;
+  const logger = Object.fromEntries(
+    ['error', 'warn', 'info', 'debug', 'trace'].map((method) => [
+      method,
+      (...args) => loggerOutput.push([method, args]),
+    ]),
+  );
+  const originalConsole = {};
+  for (const method of ['error', 'warn', 'info', 'debug', 'trace', 'log']) {
+    originalConsole[method] = console[method];
+    console[method] = (...args) => consoleOutput.push(args);
+  }
+
+  let thrown;
+  try {
+    const exchanger = createSafeOAuthCodeExchanger({
+      appId: 'cli_test',
+      appSecret: secrets.appSecret,
+      domain: 'https://open.feishu.cn',
+      logger,
+      httpInstance: {
+        async request(config) {
+          requestCount += 1;
+          const error = new Error('simulated transport failure');
+          error.config = config;
+          throw error;
+        },
+      },
+    });
+    await exchanger.exchange({
+      code: secrets.code,
+      redirectUri: secrets.redirectUri,
+    });
+  } catch (error) {
+    thrown = error;
+  } finally {
+    for (const [method, original] of Object.entries(originalConsole)) {
+      console[method] = original;
+    }
+  }
+
+  assert.ok(thrown);
+  assert.equal(requestCount, 1);
+  assert.deepEqual(consoleOutput, []);
+  assert.deepEqual(loggerOutput, []);
+  const visibleOutput = JSON.stringify({
+    consoleOutput,
+    loggerOutput,
+    thrown: {
+      name: thrown.name,
+      message: thrown.message,
+      stack: thrown.stack,
+      ...thrown,
+    },
+  });
+  assert.equal(visibleOutput.includes(secrets.code), false);
+  assert.equal(visibleOutput.includes(secrets.appSecret), false);
+  assert.equal(visibleOutput.includes(secrets.redirectUri), false);
+  assert.equal(visibleOutput.includes('sensitive-query-marker'), false);
+});
 
 async function withFixture(run) {
   const value = await fixture();
@@ -149,4 +220,24 @@ test('does not exchange a code for invalid state and returns 404 for every other
     assert.deepEqual(exchanges, []);
     assert.deepEqual(writes, []);
   });
+});
+
+test('returns fixed Chinese text when code exchange fails', async () => {
+  const sensitiveError = new Error('sensitive provider detail');
+  const value = await fixture({ exchangeError: sensitiveError });
+  try {
+    const startUrl = new URL(await value.oauth.authorizationUrl('ou_owner'));
+    const state = startUrl.searchParams.get('state');
+    const response = await fetch(
+      `${value.baseUrl}/oauth/callback?code=fake-code&state=${encodeURIComponent(state)}`,
+    );
+    const body = await response.text();
+
+    assert.equal(response.status, 500);
+    assert.equal(body, '授权失败，请重新发起授权。');
+    assert.equal(body.includes(sensitiveError.message), false);
+    assert.deepEqual(value.writes, []);
+  } finally {
+    await value.oauth.stop();
+  }
 });

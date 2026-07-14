@@ -114,16 +114,27 @@ test('lists members and maps people fields by open id', async () => {
   const calls = [];
   const client = { bitable: { v1: { appTableRecord: { list: async (payload) => {
     calls.push(payload);
-    return { code: 0, data: { has_more: false, items: [{ record_id: 'member-rec', fields: {
-      成员: [{ id: 'ou_owner', name: '张三' }],
-      leaders: [{ id: 'ou_leader_1', name: '李经理' }, { id: 'ou_leader_2', name: '王经理' }],
-    }}] } };
+    return { code: 0, data: { has_more: false, items: [
+      { record_id: 'member-rec', fields: {
+        成员: [{ id: 'ou_owner', name: '张三' }], 姓名: '姓名文本不覆盖人员名称',
+        leaders: [{ id: 'ou_leader_1', name: '李经理' }, { id: 'ou_leader_2', name: '王经理' }],
+      } },
+      { record_id: 'member-without-person', fields: {
+        姓名: '仅有姓名文本', leaders: [{ id: 'ou_leader_3', name: '赵经理' }],
+      } },
+    ] } };
   } } } } };
   const base = createBaseClient({ client, baseToken: 'bas', membersTableId: 'tbl_members' });
 
-  assert.deepEqual(await base.listMembers(), [{
-    recordId: 'member-rec', openId: 'ou_owner', name: '张三',
-    leaderOpenIds: ['ou_leader_1', 'ou_leader_2'],
-  }]);
+  assert.deepEqual(await base.listMembers(), [
+    {
+      recordId: 'member-rec', openId: 'ou_owner', name: '张三',
+      leaderOpenIds: ['ou_leader_1', 'ou_leader_2'],
+    },
+    {
+      recordId: 'member-without-person', openId: '', name: '仅有姓名文本',
+      leaderOpenIds: ['ou_leader_3'],
+    },
+  ]);
   assert.equal(calls[0].path.table_id, 'tbl_members');
 });

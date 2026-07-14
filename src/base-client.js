@@ -183,7 +183,7 @@ export function createBaseClient({
       return records.map(({ record_id: recordId, fields }) => ({
         recordId,
         openId: fields['成员']?.[0]?.id || '',
-        name: fields['成员']?.[0]?.name || '',
+        name: fields['成员']?.[0]?.name || fields['姓名'] || '',
         leaderOpenIds: (fields.leaders || []).map(({ id }) => id),
       }));
     },

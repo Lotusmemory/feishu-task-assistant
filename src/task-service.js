@@ -99,5 +99,10 @@ export function createTaskService({ base, members, confirmations, clock = Date.n
       await confirmations.markSucceeded(confirmationId, actorOpenId);
       return { kind: 'result', text: '操作成功。' };
     },
+
+    async cancel(confirmationId, actorOpenId) {
+      const cancelled = await confirmations.cancel(confirmationId, actorOpenId);
+      return { kind: 'result', text: cancelled ? '操作已取消。' : '该操作已处理。' };
+    },
   };
 }

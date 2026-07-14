@@ -112,3 +112,15 @@ test('concurrent begin calls only return one action', async () => {
   ]);
   assert.deepEqual(results.filter(Boolean), [action]);
 });
+
+test('only the owning actor can cancel a pending confirmation', async () => {
+  const store = createMemoryStore();
+  const confirmations = createConfirmationStore({ store, ttlMs: 1_000, clock: () => 100, idFactory: () => 'cfm' });
+  await confirmations.create('ou_a', { operation: 'delete_task' });
+
+  assert.equal(await confirmations.cancel('cfm', 'ou_b'), false);
+  assert.equal(await confirmations.cancel('cfm', 'ou_a'), true);
+  assert.equal(store.snapshot().confirmations.cfm.status, 'cancelled');
+  assert.equal(await confirmations.begin('cfm', 'ou_a'), null);
+  assert.equal(await confirmations.cancel('cfm', 'ou_a'), false);
+});

@@ -52,6 +52,24 @@ export function createConfirmationStore({
       return action;
     },
 
+    async cancel(id, actorOpenId) {
+      let cancelled = false;
+      await store.update((state) => {
+        const item = state.confirmations?.[id];
+        if (!item || item.actorOpenId !== actorOpenId
+          || !['pending', 'failed'].includes(item.status) || item.expiresAt <= clock()) return state;
+        cancelled = true;
+        return {
+          ...state,
+          confirmations: {
+            ...state.confirmations,
+            [id]: { ...item, status: 'cancelled' },
+          },
+        };
+      });
+      return cancelled;
+    },
+
     async markSucceeded(id, actorOpenId) {
       await store.update((state) => {
         const item = state.confirmations?.[id];

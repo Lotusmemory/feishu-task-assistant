@@ -20,6 +20,12 @@ function fixture({ tasks = [], members = [], baseOverrides = {} } = {}) {
       item.status = 'executing';
       return item.action;
     },
+    async cancel(id, actorOpenId) {
+      const item = actions.get(id);
+      if (!item || item.actorOpenId !== actorOpenId || !['pending', 'failed'].includes(item.status)) return false;
+      item.status = 'cancelled';
+      return true;
+    },
     async markSucceeded(id, actorOpenId) {
       const item = actions.get(id);
       if (item?.actorOpenId === actorOpenId && item.status === 'executing') item.status = 'succeeded';
@@ -169,4 +175,13 @@ test('concurrent confirmations allow only one Base writer', async () => {
   release();
   assert.deepEqual(await first, { kind: 'result', text: '操作成功。' });
   assert.equal(writes.length, 1);
+});
+
+test('cancels a prepared operation without writing Base', async () => {
+  const { service, writes } = fixture({ tasks: [task] });
+  const prepared = await service.prepare({ operation: 'delete_task', selector: { name: '首页设计' }, fields: {} }, 'ou_actor');
+
+  assert.deepEqual(await service.cancel(prepared.confirmationId, 'ou_actor'), { kind: 'result', text: '操作已取消。' });
+  assert.deepEqual(await service.confirm(prepared.confirmationId, 'ou_actor'), { kind: 'result', text: '该操作已处理。' });
+  assert.deepEqual(writes, []);
 });

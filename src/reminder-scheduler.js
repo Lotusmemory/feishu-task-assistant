@@ -52,13 +52,66 @@ export function createReminderScheduler({
     });
   }
 
-  async function sendOnce(dateKey, category, openId, send) {
-    if (await wasSent(dateKey, category, openId)) return;
+  async function sendOnce(dateKey, category, ledgerKey, openId, send, recipientErrors) {
+    if (await wasSent(dateKey, category, ledgerKey)) return;
     try {
       await send();
-      await markSent(dateKey, category, openId);
+      await markSent(dateKey, category, ledgerKey);
     } catch (error) {
+      recipientErrors.push({ category, openId, ledgerKey, reason: error.message });
+      logger.error('Reminder recipient failed', { dateKey, category, openId, ledgerKey, error });
+    }
+  }
+
+  async function reminderSnapshot(dateKey, category, openId, build) {
+    const existing = (await store.read()).reminderSnapshots?.[dateKey]?.[category]?.[openId];
+    if (existing) return structuredClone(existing);
+
+    const created = build();
+    let selected;
+    await store.update((state) => {
+      state.reminderSnapshots ||= {};
+      state.reminderSnapshots[dateKey] ||= { owner: {}, leader: {} };
+      state.reminderSnapshots[dateKey][category] ||= {};
+      selected = state.reminderSnapshots[dateKey][category][openId];
+      if (!selected) {
+        state.reminderSnapshots[dateKey][category][openId] = structuredClone(created);
+        selected = state.reminderSnapshots[dateKey][category][openId];
+      }
+      return state;
+    });
+    return structuredClone(selected);
+  }
+
+  async function sendTaskRecipient(dateKey, category, openId, buildCards, recipientErrors) {
+    let parts;
+    try {
+      parts = await reminderSnapshot(dateKey, category, openId, () => {
+        const cards = buildCards();
+        return cards.map((card, index) => {
+          const part = `${index + 1}/${cards.length}`;
+          return {
+            key: `${openId}:${part}`,
+            uuid: `${category}:${dateKey}:${openId}:${part}`,
+            card,
+          };
+        });
+      });
+    } catch (error) {
+      recipientErrors.push({ category, openId, reason: error.message });
       logger.error('Reminder recipient failed', { dateKey, category, openId, error });
+      return;
+    }
+
+    for (const part of parts) {
+      await sendOnce(
+        dateKey,
+        category,
+        part.key,
+        openId,
+        () => messenger.sendCard(openId, part.card, part.uuid),
+        recipientErrors,
+      );
     }
   }
 
@@ -66,37 +119,46 @@ export function createReminderScheduler({
     const date = asDate(at);
     const { dateKey, window } = windowFor(date);
     const plan = await reminderService.buildPlan(window);
+    const recipientErrors = [];
+    let savedSnapshots = {};
+    try {
+      savedSnapshots = (await store.read()).reminderSnapshots?.[dateKey] || {};
+    } catch (error) {
+      logger.error('Reminder snapshot index failed', { dateKey, error });
+    }
+    const ownerByOpenId = new Map(plan.owners.map((owner) => [owner.openId, owner]));
+    const leaderByOpenId = new Map(plan.leaders.map((leader) => [leader.openId, leader]));
+    const ownerOpenIds = new Set([...Object.keys(savedSnapshots.owner || {}), ...ownerByOpenId.keys()]);
+    const leaderOpenIds = new Set([...Object.keys(savedSnapshots.leader || {}), ...leaderByOpenId.keys()]);
 
-    for (const owner of plan.owners) {
-      const cards = buildOwnerReminderCards(owner, dateKey);
-      for (const [index, card] of cards.entries()) {
-        const part = `${index + 1}/${cards.length}`;
-        await sendOnce(dateKey, 'owner', `${owner.openId}:${part}`, () => messenger.sendCard(
-          owner.openId,
-          card,
-          `owner:${dateKey}:${owner.openId}:${part}`,
-        ));
-      }
+    for (const openId of ownerOpenIds) {
+      const owner = ownerByOpenId.get(openId);
+      await sendTaskRecipient(
+        dateKey,
+        'owner',
+        openId,
+        () => buildOwnerReminderCards(owner, dateKey),
+        recipientErrors,
+      );
     }
-    for (const leader of plan.leaders) {
-      const cards = buildLeaderSummaryCards(leader);
-      for (const [index, card] of cards.entries()) {
-        const part = `${index + 1}/${cards.length}`;
-        await sendOnce(dateKey, 'leader', `${leader.openId}:${part}`, () => messenger.sendCard(
-          leader.openId,
-          card,
-          `leader:${dateKey}:${leader.openId}:${part}`,
-        ));
-      }
+    for (const openId of leaderOpenIds) {
+      const leader = leaderByOpenId.get(openId);
+      await sendTaskRecipient(
+        dateKey,
+        'leader',
+        openId,
+        () => buildLeaderSummaryCards(leader),
+        recipientErrors,
+      );
     }
     for (const owner of plan.owners) {
-      await sendOnce(dateKey, 'consent', owner.openId, () => messenger.sendCard(
+      await sendOnce(dateKey, 'consent', owner.openId, owner.openId, () => messenger.sendCard(
         owner.openId,
         buildConsentCard(),
         `consent:${dateKey}:${owner.openId}`,
-      ));
+      ), recipientErrors);
     }
-    return plan;
+    return { ...plan, recipientErrors };
   }
 
   function schedule() {

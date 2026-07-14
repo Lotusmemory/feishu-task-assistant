@@ -55,16 +55,17 @@ test('persists each successful recipient and does not resend after restart', asy
   await restarted.runNow(NOW);
 
   assert.equal(sent.length, 3);
-  assert.deepEqual(await dependencies.store.read(), {
-    reminderRuns: {
+  const state = await dependencies.store.read();
+  assert.deepEqual(state.reminderRuns, {
       '2026-07-14': {
         owner: { 'ou_a:1/1': 'sent' },
         leader: { 'ou_l:1/1': 'sent' },
         consent: { ou_a: 'sent' },
       },
-    },
-    confirmations: {},
   });
+  assert.deepEqual(state.confirmations, {});
+  assert.equal(state.reminderSnapshots['2026-07-14'].owner.ou_a.length, 1);
+  assert.equal(state.reminderSnapshots['2026-07-14'].leader.ou_l.length, 1);
 });
 
 test('isolates recipient failures and only persists successful sends', async () => {
@@ -80,14 +81,13 @@ test('isolates recipient failures and only persists successful sends', async () 
 
   assert.deepEqual(sent.map(({ openId }) => openId), ['ou_l', 'ou_a']);
   assert.equal(errors.length, 1);
-  assert.deepEqual(await dependencies.store.read(), {
-    reminderRuns: {
+  const state = await dependencies.store.read();
+  assert.deepEqual(state.reminderRuns, {
       '2026-07-14': {
         owner: {}, leader: { 'ou_l:1/1': 'sent' }, consent: { ou_a: 'sent' },
       },
-    },
-    confirmations: {},
   });
+  assert.deepEqual(state.confirmations, {});
 });
 
 test('uses one-shot timers and recalculates the next 18:00 run after execution', async () => {
@@ -295,4 +295,129 @@ test('persists split cards independently and restart retries only the failed par
   assert.deepEqual((await dependencies.store.read()).reminderRuns['2026-07-14'].owner, {
     'ou_a:1/2': 'sent', 'ou_a:2/2': 'sent',
   });
+});
+
+test('isolates oversized recipient card construction and continues later recipients and consent', async () => {
+  const oversized = { ...task, recordId: 'rec_big', blocker: '阻'.repeat(30_000) };
+  const sent = [];
+  const { dependencies } = await fixture({
+    reminderService: { async buildPlan() {
+      return {
+        owners: [
+          { openId: 'ou_big', tasks: [oversized] },
+          { openId: 'ou_good', tasks: [{ ...task, recordId: 'rec_good' }] },
+        ],
+        leaders: [{
+          openId: 'ou_leader',
+          owners: [{ openId: 'ou_good', name: '正常负责人', tasks: [{ ...task, recordId: 'rec_good' }] }],
+        }],
+        warnings: [],
+      };
+    } },
+    messenger: { async sendCard(openId, card, uuid) { sent.push({ openId, card, uuid }); } },
+  });
+
+  const result = await createReminderScheduler(dependencies).runNow(NOW);
+
+  assert.deepEqual(result.recipientErrors, []);
+  assert.deepEqual(sent.map(({ openId }) => openId), ['ou_big', 'ou_good', 'ou_leader', 'ou_big', 'ou_good']);
+  const bigCard = sent.find(({ openId, uuid }) => openId === 'ou_big' && uuid.startsWith('owner:')).card;
+  assert.ok(Buffer.byteLength(JSON.stringify(bigCard), 'utf8') <= 28 * 1024);
+  assert.match(JSON.stringify(bigCard), /…/);
+  assert.doesNotMatch(JSON.stringify(bigCard), new RegExp(`阻{${30_000}}`));
+});
+
+test('records a recipient card build failure and continues other recipients', async () => {
+  const sent = [];
+  const { dependencies } = await fixture({
+    reminderService: { async buildPlan() {
+      return {
+        owners: [
+          { openId: 'ou_bad', tasks: [{ ...task, recordId: 'r'.repeat(30_000) }] },
+          { openId: 'ou_good', tasks: [{ ...task, recordId: 'rec_good' }] },
+        ],
+        leaders: [{
+          openId: 'ou_leader',
+          owners: [{ openId: 'ou_good', name: '正常负责人', tasks: [{ ...task, recordId: 'rec_good' }] }],
+        }],
+        warnings: [],
+      };
+    } },
+    messenger: { async sendCard(openId, card, uuid) { sent.push({ openId, uuid }); } },
+  });
+
+  const result = await createReminderScheduler(dependencies).runNow(NOW);
+
+  assert.equal(result.recipientErrors.length, 1);
+  assert.deepEqual(result.recipientErrors[0].category, 'owner');
+  assert.deepEqual(result.recipientErrors[0].openId, 'ou_bad');
+  assert.deepEqual(sent.map(({ openId }) => openId), ['ou_good', 'ou_leader', 'ou_bad', 'ou_good']);
+});
+
+test('restarts from the first daily snapshot even when the plan later changes part count and order', async () => {
+  const originalTasks = Array.from({ length: 17 }, (_, index) => ({
+    ...task, recordId: `original-${index}`, name: `原任务${index}`,
+  }));
+  let changed = false;
+  const attempts = [];
+  const { dependencies, path } = await fixture({
+    reminderService: { async buildPlan() {
+      return {
+        owners: [{
+          openId: 'ou_a',
+          tasks: changed ? [{ ...task, recordId: 'new-only', name: '新增任务' }] : originalTasks,
+        }],
+        leaders: [], warnings: [],
+      };
+    } },
+    messenger: { async sendCard(openId, card, uuid) {
+      attempts.push({ uuid, serialized: JSON.stringify(card) });
+      if (uuid.endsWith(':2/2') && attempts.filter((item) => item.uuid === uuid).length === 1) {
+        throw new Error('second part failed');
+      }
+    } },
+  });
+  await createReminderScheduler(dependencies).runNow(NOW);
+  changed = true;
+  await createReminderScheduler({
+    ...dependencies,
+    store: createJsonStore({ path, defaultValue: { reminderRuns: {}, confirmations: {} } }),
+  }).runNow(NOW);
+
+  const firstPart = attempts.filter(({ uuid }) => uuid === 'owner:2026-07-14:ou_a:1/2');
+  const secondPart = attempts.filter(({ uuid }) => uuid === 'owner:2026-07-14:ou_a:2/2');
+  assert.equal(firstPart.length, 1);
+  assert.equal(secondPart.length, 2);
+  assert.equal(secondPart[1].serialized, secondPart[0].serialized);
+  assert.match(secondPart[1].serialized, /original-/);
+  assert.doesNotMatch(secondPart[1].serialized, /new-only|新增任务/);
+  const snapshot = (await dependencies.store.read()).reminderSnapshots['2026-07-14'].owner.ou_a;
+  assert.deepEqual(snapshot.map(({ key, uuid }) => ({ key, uuid })), [
+    { key: 'ou_a:1/2', uuid: 'owner:2026-07-14:ou_a:1/2' },
+    { key: 'ou_a:2/2', uuid: 'owner:2026-07-14:ou_a:2/2' },
+  ]);
+});
+
+test('retries an existing snapshot even when its recipient disappeared from the latest plan', async () => {
+  let removed = false;
+  const attempts = [];
+  const tasks = Array.from({ length: 17 }, (_, index) => ({ ...task, recordId: `removed-${index}` }));
+  const { dependencies, path } = await fixture({
+    reminderService: { async buildPlan() {
+      return { owners: removed ? [] : [{ openId: 'ou_removed', tasks }], leaders: [], warnings: [] };
+    } },
+    messenger: { async sendCard(openId, card, uuid) {
+      attempts.push(uuid);
+      if (uuid.endsWith(':2/2') && attempts.filter((item) => item === uuid).length === 1) throw new Error('failed');
+    } },
+  });
+  await createReminderScheduler(dependencies).runNow(NOW);
+  removed = true;
+  await createReminderScheduler({
+    ...dependencies,
+    store: createJsonStore({ path, defaultValue: { reminderRuns: {}, confirmations: {} } }),
+  }).runNow(NOW);
+
+  assert.equal(attempts.filter((uuid) => uuid === 'owner:2026-07-14:ou_removed:1/2').length, 1);
+  assert.equal(attempts.filter((uuid) => uuid === 'owner:2026-07-14:ou_removed:2/2').length, 2);
 });

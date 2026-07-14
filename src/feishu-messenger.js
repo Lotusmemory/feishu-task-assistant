@@ -22,11 +22,18 @@ function callbackButton(text, type, value) {
   };
 }
 
+function truncateText(value, maximum) {
+  const characters = Array.from(String(value || ''));
+  return characters.length <= maximum ? characters.join('') : `${characters.slice(0, maximum).join('')}…`;
+}
+
 function taskMarkdown(task, ownerName) {
-  const owner = ownerName ? `\n负责人：${ownerName}` : '';
+  const name = truncateText(task.name, 200);
+  const owner = ownerName ? `\n负责人：${truncateText(ownerName, 100)}` : '';
   const deadline = task.deadline ? new Date(task.deadline).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未设置';
-  const blocker = task.blocker || '无';
-  return `**${task.name}**${owner}\n状态：${task.status || '未设置'}\n截止时间：${deadline}\n阻塞原因：${blocker}`;
+  const status = truncateText(task.status || '未设置', 100);
+  const blocker = truncateText(task.blocker || '无', 1_000);
+  return `**${name}**${owner}\n状态：${status}\n截止时间：${deadline}\n阻塞原因：${blocker}`;
 }
 
 export function countTaggedComponents(value) {

@@ -81,16 +81,22 @@ export function createTaskService({ base, members, confirmations, clock = Date.n
     },
 
     async confirm(confirmationId, actorOpenId) {
-      const action = await confirmations.consume(confirmationId, actorOpenId);
+      const action = await confirmations.begin(confirmationId, actorOpenId);
       if (!action) return { kind: 'result', text: '该操作已处理。' };
 
-      if (action.operation === 'create_task') await base.createTask(action.fields);
-      else if (['update_task', 'complete_task', 'block_task', 'postpone_task'].includes(action.operation)) {
-        await base.updateTask(action.recordId, action.fields);
+      try {
+        if (action.operation === 'create_task') await base.createTask(action.fields);
+        else if (['update_task', 'complete_task', 'block_task', 'postpone_task'].includes(action.operation)) {
+          await base.updateTask(action.recordId, action.fields);
+        }
+        else if (action.operation === 'delete_task') await base.deleteTask(action.recordId);
+        else throw new Error(`Unsupported confirmed operation: ${action.operation}`);
+      } catch (error) {
+        await confirmations.markFailed(confirmationId, actorOpenId);
+        throw error;
       }
-      else if (action.operation === 'delete_task') await base.deleteTask(action.recordId);
-      else return { kind: 'result', text: '不支持的任务操作。' };
 
+      await confirmations.markSucceeded(confirmationId, actorOpenId);
       return { kind: 'result', text: '操作成功。' };
     },
   };

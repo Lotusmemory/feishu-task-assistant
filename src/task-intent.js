@@ -16,10 +16,6 @@ function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function allowedEntries(value, whitelist) {
-  return Object.fromEntries(Object.entries(value).filter(([key]) => whitelist.has(key)));
-}
-
 function isFieldValue(value) {
   return ['string', 'number', 'boolean'].includes(typeof value)
     || (Array.isArray(value) && value.every((item) => ['string', 'number'].includes(typeof item)));
@@ -38,8 +34,10 @@ export function createTaskIntentParser({ minimax }) {
       if (!isObject(candidate) || !OPERATIONS.has(candidate.operation)
         || !isObject(candidate.selector) || !isObject(candidate.fields)) return null;
 
-      const selector = allowedEntries(candidate.selector, SELECTOR_FIELDS);
-      const fields = allowedEntries(candidate.fields, WRITABLE_FIELDS);
+      if (!Object.keys(candidate.selector).every((key) => SELECTOR_FIELDS.has(key))
+        || !Object.keys(candidate.fields).every((key) => WRITABLE_FIELDS.has(key))) return null;
+
+      const { selector, fields } = candidate;
       if (!Object.values(selector).every((value) => typeof value === 'string')
         || !Object.values(fields).every(isFieldValue)) return null;
 

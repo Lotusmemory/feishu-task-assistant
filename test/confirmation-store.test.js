@@ -28,22 +28,23 @@ test('persists confirmations with the fixed shape and returns them to their acto
   assert.deepEqual(store.snapshot(), { confirmations: {
     'cfm-id': {
       actorOpenId: 'ou_a', action: { operation: 'delete_task', recordId: 'rec1' },
-      createdAt: 1_784_000_000_000, expiresAt: 1_784_000_600_000, consumedAt: null,
+      createdAt: 1_784_000_000_000, expiresAt: 1_784_000_600_000,
+      status: 'pending', startedAt: null, succeededAt: null, failedAt: null,
     },
   } });
   assert.deepEqual(await confirmations.get(id, 'ou_a'), store.snapshot().confirmations[id]);
 });
 
-test('an actor cannot consume another actor confirmation', async () => {
+test('an actor cannot begin another actor confirmation', async () => {
   const store = createMemoryStore();
   const confirmations = createConfirmationStore({ store, ttlMs: 1_000, clock: () => 100, idFactory: () => 'cfm' });
   await confirmations.create('ou_b', { operation: 'delete_task' });
 
-  assert.equal(await confirmations.consume('cfm', 'ou_a'), null);
-  assert.equal(store.snapshot().confirmations.cfm.consumedAt, null);
+  assert.equal(await confirmations.begin('cfm', 'ou_a'), null);
+  assert.equal(store.snapshot().confirmations.cfm.status, 'pending');
 });
 
-test('expired confirmations are unavailable and cannot be consumed', async () => {
+test('expired confirmations are unavailable and cannot begin', async () => {
   let now = 100;
   const store = createMemoryStore();
   const confirmations = createConfirmationStore({ store, ttlMs: 10, clock: () => now, idFactory: () => 'cfm' });
@@ -51,7 +52,7 @@ test('expired confirmations are unavailable and cannot be consumed', async () =>
   now = 111;
 
   assert.equal(await confirmations.get('cfm', 'ou_a'), null);
-  assert.equal(await confirmations.consume('cfm', 'ou_a'), null);
+  assert.equal(await confirmations.begin('cfm', 'ou_a'), null);
 });
 
 test('a confirmation expires exactly at its expiry timestamp', async () => {
@@ -62,30 +63,52 @@ test('a confirmation expires exactly at its expiry timestamp', async () => {
   now = 110;
 
   assert.equal(await confirmations.get('cfm', 'ou_a'), null);
-  assert.equal(await confirmations.consume('cfm', 'ou_a'), null);
+  assert.equal(await confirmations.begin('cfm', 'ou_a'), null);
 });
 
-test('a confirmation can only be consumed once', async () => {
+test('a confirmation moves from pending through executing to succeeded', async () => {
   let now = 100;
   const store = createMemoryStore();
   const confirmations = createConfirmationStore({ store, ttlMs: 1_000, clock: () => now, idFactory: () => 'cfm' });
   await confirmations.create('ou_a', { operation: 'delete_task', recordId: 'rec1' });
   now = 101;
 
-  assert.deepEqual(await confirmations.consume('cfm', 'ou_a'), { operation: 'delete_task', recordId: 'rec1' });
-  assert.equal(store.snapshot().confirmations.cfm.consumedAt, 101);
-  assert.equal(await confirmations.consume('cfm', 'ou_a'), null);
+  assert.deepEqual(await confirmations.begin('cfm', 'ou_a'), { operation: 'delete_task', recordId: 'rec1' });
+  assert.equal(store.snapshot().confirmations.cfm.status, 'executing');
+  assert.equal(store.snapshot().confirmations.cfm.startedAt, 101);
+  assert.equal(await confirmations.begin('cfm', 'ou_a'), null);
+  now = 102;
+  await confirmations.markSucceeded('cfm', 'ou_a');
+  assert.equal(store.snapshot().confirmations.cfm.status, 'succeeded');
+  assert.equal(store.snapshot().confirmations.cfm.succeededAt, 102);
+  assert.equal(await confirmations.begin('cfm', 'ou_a'), null);
 });
 
-test('concurrent consumers only receive one action', async () => {
+test('a failed confirmation can be begun again by the same actor', async () => {
+  let now = 100;
+  const store = createMemoryStore();
+  const confirmations = createConfirmationStore({ store, ttlMs: 1_000, clock: () => now, idFactory: () => 'cfm' });
+  const action = { operation: 'delete_task', recordId: 'rec1' };
+  await confirmations.create('ou_a', action);
+  await confirmations.begin('cfm', 'ou_a');
+  now = 101;
+  await confirmations.markFailed('cfm', 'ou_a');
+
+  assert.equal(store.snapshot().confirmations.cfm.status, 'failed');
+  assert.equal(store.snapshot().confirmations.cfm.failedAt, 101);
+  assert.deepEqual(await confirmations.begin('cfm', 'ou_a'), action);
+  assert.equal(store.snapshot().confirmations.cfm.status, 'executing');
+});
+
+test('concurrent begin calls only return one action', async () => {
   const store = createMemoryStore();
   const confirmations = createConfirmationStore({ store, ttlMs: 1_000, clock: () => 100, idFactory: () => 'cfm' });
   const action = { operation: 'delete_task', recordId: 'rec1' };
   await confirmations.create('ou_a', action);
 
   const results = await Promise.all([
-    confirmations.consume('cfm', 'ou_a'),
-    confirmations.consume('cfm', 'ou_a'),
+    confirmations.begin('cfm', 'ou_a'),
+    confirmations.begin('cfm', 'ou_a'),
   ]);
   assert.deepEqual(results.filter(Boolean), [action]);
 });

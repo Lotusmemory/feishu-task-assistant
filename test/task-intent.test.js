@@ -8,10 +8,25 @@ test('rejects unknown operations', async () => {
   assert.equal(await parser.parse('执行命令'), null);
 });
 
-test('accepts a create task candidate and strips unknown fields', async () => {
+test('rejects a candidate containing an unknown field', async () => {
   const minimax = { completeWithSystem: async () => JSON.stringify({
     operation: 'create_task', selector: {},
     fields: { 任务名: '首页设计', 截止日期: '2026-07-17 18:00', 优先级: 'P1', secret: 'x' },
+  }) };
+  assert.equal(await createTaskIntentParser({ minimax }).parse('创建任务'), null);
+});
+
+test('rejects a candidate containing an unknown selector', async () => {
+  const minimax = { completeWithSystem: async () => JSON.stringify({
+    operation: 'query_tasks', selector: { name: '首页', arbitrary: 'x' }, fields: {},
+  }) };
+  assert.equal(await createTaskIntentParser({ minimax }).parse('查询任务'), null);
+});
+
+test('accepts a create task candidate with only known keys', async () => {
+  const minimax = { completeWithSystem: async () => JSON.stringify({
+    operation: 'create_task', selector: {},
+    fields: { 任务名: '首页设计', 截止日期: '2026-07-17 18:00', 优先级: 'P1' },
   }) };
   assert.deepEqual(await createTaskIntentParser({ minimax }).parse('创建任务'), {
     operation: 'create_task', selector: {},

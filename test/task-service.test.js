@@ -2,23 +2,31 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createTaskService } from '../src/task-service.js';
 
-function fixture({ tasks = [], members = [] } = {}) {
+function fixture({ tasks = [], members = [], baseOverrides = {} } = {}) {
   const writes = [];
   const actions = new Map();
   let sequence = 0;
   const base = {
     async searchTasks(selector) { base.selector = selector; return tasks; },
-    async createTask(fields) { writes.push(['create', fields]); },
-    async updateTask(recordId, fields) { writes.push(['update', recordId, fields]); },
-    async deleteTask(recordId) { writes.push(['delete', recordId]); },
+    async createTask(fields) { writes.push(['create', fields]); return baseOverrides.createTask?.(fields); },
+    async updateTask(recordId, fields) { writes.push(['update', recordId, fields]); return baseOverrides.updateTask?.(recordId, fields); },
+    async deleteTask(recordId) { writes.push(['delete', recordId]); return baseOverrides.deleteTask?.(recordId); },
   };
   const confirmations = {
-    async create(actorOpenId, action) { const id = `cfm-${++sequence}`; actions.set(id, { actorOpenId, action, consumed: false }); return id; },
-    async consume(id, actorOpenId) {
+    async create(actorOpenId, action) { const id = `cfm-${++sequence}`; actions.set(id, { actorOpenId, action, status: 'pending' }); return id; },
+    async begin(id, actorOpenId) {
       const item = actions.get(id);
-      if (!item || item.actorOpenId !== actorOpenId || item.consumed) return null;
-      item.consumed = true;
+      if (!item || item.actorOpenId !== actorOpenId || !['pending', 'failed'].includes(item.status)) return null;
+      item.status = 'executing';
       return item.action;
+    },
+    async markSucceeded(id, actorOpenId) {
+      const item = actions.get(id);
+      if (item?.actorOpenId === actorOpenId && item.status === 'executing') item.status = 'succeeded';
+    },
+    async markFailed(id, actorOpenId) {
+      const item = actions.get(id);
+      if (item?.actorOpenId === actorOpenId && item.status === 'executing') item.status = 'failed';
     },
   };
   return {
@@ -118,7 +126,7 @@ test('resolves an owner name before preparing an owner change', async () => {
   assert.deepEqual(writes, [['update', 'rec1', { 负责人: 'ou_next' }]]);
 });
 
-test('consumes a confirmation before writing and never writes it twice', async () => {
+test('successful confirmation never writes twice', async () => {
   const { service, writes } = fixture({ tasks: [task] });
   const prepared = await service.prepare({ operation: 'delete_task', selector: { name: '首页设计' }, fields: {} }, 'ou_actor');
 
@@ -127,4 +135,38 @@ test('consumes a confirmation before writing and never writes it twice', async (
   assert.deepEqual(await service.confirm(prepared.confirmationId, 'ou_actor'), { kind: 'result', text: '操作成功。' });
   assert.deepEqual(await service.confirm(prepared.confirmationId, 'ou_actor'), { kind: 'result', text: '该操作已处理。' });
   assert.deepEqual(writes, [['delete', 'rec1']]);
+});
+
+test('retries a confirmation after a transient Base failure', async () => {
+  let attempts = 0;
+  const { service, writes } = fixture({
+    tasks: [task],
+    baseOverrides: { async deleteTask() { attempts += 1; if (attempts === 1) throw new Error('transient'); } },
+  });
+  const prepared = await service.prepare({ operation: 'delete_task', selector: { name: '首页设计' }, fields: {} }, 'ou_actor');
+
+  await assert.rejects(() => service.confirm(prepared.confirmationId, 'ou_actor'), /transient/);
+  assert.deepEqual(await service.confirm(prepared.confirmationId, 'ou_actor'), { kind: 'result', text: '操作成功。' });
+  assert.equal(attempts, 2);
+  assert.deepEqual(writes, [['delete', 'rec1'], ['delete', 'rec1']]);
+});
+
+test('concurrent confirmations allow only one Base writer', async () => {
+  let release;
+  let entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const { service, writes } = fixture({
+    tasks: [task],
+    baseOverrides: { async deleteTask() { entered(); await blocked; } },
+  });
+  const prepared = await service.prepare({ operation: 'delete_task', selector: { name: '首页设计' }, fields: {} }, 'ou_actor');
+
+  const first = service.confirm(prepared.confirmationId, 'ou_actor');
+  await started;
+  assert.deepEqual(await service.confirm(prepared.confirmationId, 'ou_actor'), { kind: 'result', text: '该操作已处理。' });
+  assert.equal(writes.length, 1);
+  release();
+  assert.deepEqual(await first, { kind: 'result', text: '操作成功。' });
+  assert.equal(writes.length, 1);
 });

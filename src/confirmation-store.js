@@ -16,7 +16,10 @@ export function createConfirmationStore({
             action: structuredClone(action),
             createdAt,
             expiresAt: createdAt + ttlMs,
-            consumedAt: null,
+            status: 'pending',
+            startedAt: null,
+            succeededAt: null,
+            failedAt: null,
           },
         },
       }));
@@ -25,26 +28,56 @@ export function createConfirmationStore({
 
     async get(id, actorOpenId) {
       const item = (await store.read()).confirmations?.[id];
-      if (!item || item.actorOpenId !== actorOpenId || item.consumedAt !== null || item.expiresAt <= clock()) return null;
+      if (!item || item.actorOpenId !== actorOpenId
+        || !['pending', 'failed'].includes(item.status) || item.expiresAt <= clock()) return null;
       return structuredClone(item);
     },
 
-    async consume(id, actorOpenId) {
+    async begin(id, actorOpenId) {
       let action = null;
       await store.update((state) => {
         const item = state.confirmations?.[id];
         const now = clock();
-        if (!item || item.actorOpenId !== actorOpenId || item.consumedAt !== null || item.expiresAt <= now) return state;
+        if (!item || item.actorOpenId !== actorOpenId
+          || !['pending', 'failed'].includes(item.status) || item.expiresAt <= now) return state;
         action = structuredClone(item.action);
         return {
           ...state,
           confirmations: {
             ...state.confirmations,
-            [id]: { ...item, consumedAt: now },
+            [id]: { ...item, status: 'executing', startedAt: now, failedAt: null },
           },
         };
       });
       return action;
+    },
+
+    async markSucceeded(id, actorOpenId) {
+      await store.update((state) => {
+        const item = state.confirmations?.[id];
+        if (!item || item.actorOpenId !== actorOpenId || item.status !== 'executing') return state;
+        return {
+          ...state,
+          confirmations: {
+            ...state.confirmations,
+            [id]: { ...item, status: 'succeeded', succeededAt: clock() },
+          },
+        };
+      });
+    },
+
+    async markFailed(id, actorOpenId) {
+      await store.update((state) => {
+        const item = state.confirmations?.[id];
+        if (!item || item.actorOpenId !== actorOpenId || item.status !== 'executing') return state;
+        return {
+          ...state,
+          confirmations: {
+            ...state.confirmations,
+            [id]: { ...item, status: 'failed', failedAt: clock() },
+          },
+        };
+      });
     },
   };
 }

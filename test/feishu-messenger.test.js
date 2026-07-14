@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createFeishuMessenger } from '../src/feishu-messenger.js';
+import {
+  buildConsentCard,
+  buildLeaderSummaryCard,
+  buildOwnerReminderCard,
+  createFeishuMessenger,
+  parseCardAction,
+} from '../src/feishu-messenger.js';
 
 function fixture(responses = {}) {
   const calls = [];
@@ -56,4 +62,63 @@ test('throws a sanitized error for a nonzero Feishu response code', async () => 
       return true;
     },
   );
+});
+
+test('builds a Card 2.0 owner reminder with four callbacks per task', () => {
+  const card = buildOwnerReminderCard({
+    openId: 'ou_a',
+    tasks: [{ recordId: 'rec1', name: '首页设计', status: '进行中', deadline: 1_784_041_200_000, blocker: '' }],
+  }, '2026-07-14');
+  const serialized = JSON.stringify(card);
+  const buttons = card.body.elements[0].columns.flatMap((column) => column.elements)
+    .filter((element) => element.tag === 'button');
+
+  assert.equal(card.schema, '2.0');
+  assert.equal(card.header.template, 'yellow');
+  assert.equal(card.config.width_mode, 'default');
+  assert.equal(card.body.elements[0].tag, 'column_set');
+  assert.match(serialized, /markdown/);
+  assert.deepEqual(buttons.map(({ type }) => type), ['primary_filled', 'default', 'danger', 'default']);
+  assert.deepEqual(buttons.map(({ behaviors }) => behaviors[0]), [
+    { type: 'callback', value: { action: 'complete', taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
+    { type: 'callback', value: { action: 'continue', taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
+    { type: 'callback', value: { action: 'block', taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
+    { type: 'callback', value: { action: 'postpone', taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
+  ]);
+});
+
+test('builds a blue read-only leader card without interactive fields', () => {
+  const card = buildLeaderSummaryCard({
+    openId: 'ou_l',
+    owners: [{ openId: 'ou_a', name: '张三', tasks: [{
+      recordId: 'rec1', name: '首页设计', status: '已阻塞', deadline: 1_784_041_200_000, blocker: '等待接口',
+    }] }],
+  });
+  const serialized = JSON.stringify(card);
+
+  assert.equal(card.header.template, 'blue');
+  assert.match(serialized, /张三/);
+  assert.match(serialized, /首页设计/);
+  assert.match(serialized, /已阻塞/);
+  assert.match(serialized, /等待接口/);
+  assert.doesNotMatch(serialized, /"(?:button|behaviors|action)"/);
+});
+
+test('builds a blue consent card with only the two consent callback values', () => {
+  const card = buildConsentCard();
+  const buttons = card.body.elements.filter(({ tag }) => tag === 'button');
+
+  assert.equal(card.header.template, 'blue');
+  assert.deepEqual(buttons.map(({ behaviors }) => behaviors[0].value), [
+    { action: 'consent_chat_summary' },
+    { action: 'decline_chat_summary' },
+  ]);
+});
+
+test('parses a valid card callback and rejects malformed events', () => {
+  assert.deepEqual(parseCardAction({
+    operator: { open_id: 'ou_a' },
+    action: { value: { action: 'complete', taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
+  }), { actorOpenId: 'ou_a', action: 'complete', taskId: 'rec1', batchId: '2026-07-14:ou_a' });
+  assert.equal(parseCardAction({ action: { value: {} } }), null);
 });

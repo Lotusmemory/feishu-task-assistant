@@ -143,6 +143,13 @@ export function createBaseClient({
       return searchTaskRecords({ conjunction: 'and', conditions }, 'Search tasks');
     },
 
+    async getTask(recordId) {
+      const response = await client.bitable.v1.appTableRecord.get({
+        path: { app_token: baseToken, table_id: tasksTableId, record_id: recordId },
+      });
+      return mapTask(assertSuccess(response, 'Get task').record);
+    },
+
     async createTask(fields) {
       const response = await client.bitable.v1.appTableRecord.create({
         path: { app_token: baseToken, table_id: tasksTableId },

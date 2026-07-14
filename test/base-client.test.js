@@ -78,6 +78,24 @@ test('searches tasks by name and owner open id', async () => {
   ]);
 });
 
+test('gets the current task by record id for callback ownership checks', async () => {
+  let payload;
+  const client = { bitable: { v1: { appTableRecord: { get: async (value) => {
+    payload = value;
+    return { code: 0, data: { record: { record_id: 'rec1', fields: {
+      任务名: '首页设计', 负责人: [{ id: 'ou_owner', name: '张三' }], 状态: '进行中',
+      进度: 60, 截止日期: 1784041200000, 优先级: 'P1', 阻塞原因: '',
+    } } } };
+  } } } } };
+  const base = createBaseClient({ client, baseToken: 'bas', tasksTableId: 'tbl_tasks' });
+
+  assert.deepEqual(await base.getTask('rec1'), {
+    recordId: 'rec1', name: '首页设计', ownerOpenId: 'ou_owner', ownerName: '张三',
+    status: '进行中', progress: 60, deadline: 1784041200000, priority: 'P1', blocker: '',
+  });
+  assert.deepEqual(payload.path, { app_token: 'bas', table_id: 'tbl_tasks', record_id: 'rec1' });
+});
+
 test('creates, updates, and deletes tasks through the tasks table', async () => {
   const calls = [];
   const appTableRecord = {

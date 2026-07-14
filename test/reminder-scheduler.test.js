@@ -4,7 +4,9 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createJsonStore } from '../src/json-store.js';
+import { createConfirmationStore } from '../src/confirmation-store.js';
 import { createReminderScheduler } from '../src/reminder-scheduler.js';
+import { createTaskService } from '../src/task-service.js';
 
 const NOW = new Date('2026-07-14T09:00:00.000Z');
 const task = {
@@ -56,8 +58,8 @@ test('persists each successful recipient and does not resend after restart', asy
   assert.deepEqual(await dependencies.store.read(), {
     reminderRuns: {
       '2026-07-14': {
-        owner: { ou_a: 'sent' },
-        leader: { ou_l: 'sent' },
+        owner: { 'ou_a:1/1': 'sent' },
+        leader: { 'ou_l:1/1': 'sent' },
         consent: { ou_a: 'sent' },
       },
     },
@@ -81,7 +83,7 @@ test('isolates recipient failures and only persists successful sends', async () 
   assert.deepEqual(await dependencies.store.read(), {
     reminderRuns: {
       '2026-07-14': {
-        owner: {}, leader: { ou_l: 'sent' }, consent: { ou_a: 'sent' },
+        owner: {}, leader: { 'ou_l:1/1': 'sent' }, consent: { ou_a: 'sent' },
       },
     },
     confirmations: {},
@@ -101,11 +103,26 @@ test('uses one-shot timers and recalculates the next 18:00 run after execution',
   assert.equal(timers[1].cleared, true);
 });
 
-test('accepts an owner action once and rejects a stale or non-owner actor', async () => {
-  const handled = [];
+test('logs a whole-run timer failure without rejecting and still schedules the next run', async () => {
+  const { dependencies, timers, errors } = await fixture({
+    reminderService: { async buildPlan() { throw new Error('plan failed'); } },
+  });
+  createReminderScheduler(dependencies).start();
+
+  await assert.doesNotReject(() => timers[0].callback());
+  assert.equal(errors.length, 1);
+  assert.match(errors[0][0], /run failed/i);
+  assert.equal(timers.length, 2);
+});
+
+test('confirms complete and continue callbacks only while the actor remains the current owner', async () => {
+  const calls = [];
   const { dependencies } = await fixture({
-    base: { async getTask() { return { ...task, ownerOpenId: 'ou_a' }; } },
-    taskService: { async prepare(intent, actorOpenId) { handled.push({ intent, actorOpenId }); return { kind: 'confirmation' }; } },
+    base: { async getTask() { calls.push(['get']); return { ...task, ownerOpenId: 'ou_a' }; } },
+    taskService: {
+      async prepare(intent, actorOpenId) { calls.push(['prepare', intent, actorOpenId]); return { kind: 'confirmation', confirmationId: 'cfm-1' }; },
+      async confirm(id, actorOpenId) { calls.push(['confirm', id, actorOpenId]); return { kind: 'result', text: '操作成功。' }; },
+    },
   });
   const scheduler = createReminderScheduler(dependencies);
   const ownerEvent = {
@@ -114,13 +131,168 @@ test('accepts an owner action once and rejects a stale or non-owner actor', asyn
     action: { value: { action: 'complete', taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
   };
 
-  assert.deepEqual(await scheduler.handleCardAction(ownerEvent), { kind: 'confirmation' });
+  assert.deepEqual(await scheduler.handleCardAction(ownerEvent), { kind: 'result', text: '操作成功。' });
   assert.deepEqual(await scheduler.handleCardAction(ownerEvent), { kind: 'ignored', reason: 'duplicate' });
+  assert.deepEqual(calls, [
+    ['get'],
+    ['prepare', { operation: 'complete_task', selector: { recordId: 'rec1' }, fields: {} }, 'ou_a'],
+    ['get'],
+    ['confirm', 'cfm-1', 'ou_a'],
+    ['get'],
+  ]);
+
+  calls.length = 0;
   assert.deepEqual(await scheduler.handleCardAction({
-    ...ownerEvent, operator: { open_id: 'ou_l' }, context: { open_message_id: 'om_2' },
-  }), { kind: 'ignored', reason: 'forbidden' });
-  assert.deepEqual(handled, [{
-    intent: { operation: 'complete_task', selector: { recordId: 'rec1' }, fields: {} },
-    actorOpenId: 'ou_a',
-  }]);
+    ...ownerEvent,
+    context: { open_message_id: 'om_continue' },
+    action: { value: { ...ownerEvent.action.value, action: 'continue' } },
+  }), { kind: 'result', text: '操作成功。' });
+  assert.deepEqual(calls[1], ['prepare', {
+    operation: 'update_task', selector: { recordId: 'rec1' }, fields: { 状态: '进行中' },
+  }, 'ou_a']);
+  assert.deepEqual(calls.at(-1), ['confirm', 'cfm-1', 'ou_a']);
+});
+
+test('rejects non-owners without preparing, confirming, or messaging', async () => {
+  const calls = [];
+  const { dependencies } = await fixture({
+    base: { async getTask() { calls.push('get'); return { ...task, ownerOpenId: 'ou_a' }; } },
+    taskService: { async prepare() { calls.push('prepare'); }, async confirm() { calls.push('confirm'); } },
+    messenger: { async sendText() { calls.push('sendText'); } },
+  });
+  const result = await createReminderScheduler(dependencies).handleCardAction({
+    operator: { open_id: 'ou_l' }, context: { open_message_id: 'om_2' },
+    action: { value: { action: 'complete', taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
+  });
+
+  assert.deepEqual(result, { kind: 'ignored', reason: 'forbidden' });
+  assert.deepEqual(calls, ['get']);
+});
+
+test('rechecks ownership before confirm and releases the callback claim when it changed', async () => {
+  let reads = 0;
+  const calls = [];
+  const { dependencies } = await fixture({
+    base: { async getTask() { reads += 1; return { ...task, ownerOpenId: reads === 1 ? 'ou_a' : 'ou_next' }; } },
+    taskService: {
+      async prepare() { calls.push('prepare'); return { kind: 'confirmation', confirmationId: 'cfm-1' }; },
+      async confirm() { calls.push('confirm'); },
+    },
+  });
+  const event = {
+    operator: { open_id: 'ou_a' }, context: { open_message_id: 'om_changed' },
+    action: { value: { action: 'complete', taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
+  };
+
+  assert.deepEqual(await createReminderScheduler(dependencies).handleCardAction(event), { kind: 'ignored', reason: 'forbidden' });
+  assert.deepEqual(calls, ['prepare']);
+  assert.deepEqual((await dependencies.store.read()).confirmations, {});
+});
+
+test('sends actionable follow-up text for block and postpone without confirming a write', async () => {
+  const calls = [];
+  const { dependencies, sent } = await fixture({
+    base: { async getTask() { return { ...task, ownerOpenId: 'ou_a' }; } },
+    taskService: {
+      async prepare(intent) { calls.push(['prepare', intent]); return { kind: 'need_input', text: '需要输入' }; },
+      async confirm() { calls.push(['confirm']); },
+    },
+  });
+  const scheduler = createReminderScheduler(dependencies);
+
+  for (const action of ['block', 'postpone']) {
+    await scheduler.handleCardAction({
+      operator: { open_id: 'ou_a' }, context: { open_message_id: `om_${action}` },
+      action: { value: { action, taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
+    });
+  }
+
+  assert.equal(calls.filter(([name]) => name === 'prepare').length, 2);
+  assert.equal(calls.some(([name]) => name === 'confirm'), false);
+  assert.equal(sent.length, 2);
+  assert.match(sent[0].text, /rec1.*阻塞原因/s);
+  assert.match(sent[1].text, /rec1.*截止日期/s);
+  assert.match(sent[0].uuid, /om_block.*block.*rec1/);
+  assert.match(sent[1].uuid, /om_postpone.*postpone.*rec1/);
+});
+
+test('releases a failed callback claim so the same event can retry', async () => {
+  let confirmations = 0;
+  const { dependencies } = await fixture({
+    base: { async getTask() { return { ...task, ownerOpenId: 'ou_a' }; } },
+    taskService: {
+      async prepare() { return { kind: 'confirmation', confirmationId: 'cfm-1' }; },
+      async confirm() { confirmations += 1; if (confirmations === 1) throw new Error('transient'); return { kind: 'result' }; },
+    },
+  });
+  const event = {
+    operator: { open_id: 'ou_a' }, context: { open_message_id: 'om_retry' },
+    action: { value: { action: 'complete', taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
+  };
+
+  const scheduler = createReminderScheduler(dependencies);
+  await assert.rejects(() => scheduler.handleCardAction(event), /transient/);
+  assert.deepEqual(await scheduler.handleCardAction(event), { kind: 'result' });
+  assert.equal(confirmations, 2);
+});
+
+test('uses the real task service to write complete and continue but not block or postpone', async () => {
+  const writes = [];
+  const { dependencies, sent } = await fixture();
+  const base = {
+    async getTask() { return { ...task, ownerOpenId: 'ou_a' }; },
+    async searchTasks() { return [{ ...task, ownerOpenId: 'ou_a' }]; },
+    async updateTask(recordId, fields) { writes.push([recordId, fields]); },
+  };
+  let sequence = 0;
+  dependencies.base = base;
+  dependencies.taskService = createTaskService({
+    base,
+    members: { async resolveByName() { return []; } },
+    confirmations: createConfirmationStore({
+      store: dependencies.store,
+      ttlMs: 60_000,
+      clock: () => NOW.getTime(),
+      idFactory: () => `cfm-${++sequence}`,
+    }),
+    clock: () => NOW.getTime(),
+  });
+  const scheduler = createReminderScheduler(dependencies);
+
+  for (const action of ['complete', 'continue', 'block', 'postpone']) {
+    await scheduler.handleCardAction({
+      operator: { open_id: 'ou_a' }, context: { open_message_id: `om_real_${action}` },
+      action: { value: { action, taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
+    });
+  }
+
+  assert.deepEqual(writes, [
+    ['rec1', { 状态: '已完成', 进度: 100, 完成时间: NOW.getTime() }],
+    ['rec1', { 状态: '进行中' }],
+  ]);
+  assert.equal(sent.filter(({ type }) => type === 'text').length, 2);
+});
+
+test('persists split cards independently and restart retries only the failed part', async () => {
+  const tasks = Array.from({ length: 17 }, (_, index) => ({ ...task, recordId: `rec${index}`, name: `任务${index}` }));
+  const attempts = [];
+  const { dependencies, path } = await fixture({
+    reminderService: { async buildPlan() { return { owners: [{ openId: 'ou_a', tasks }], leaders: [], warnings: [] }; } },
+    messenger: { async sendCard(openId, card, uuid) {
+      attempts.push(uuid);
+      if (uuid.endsWith(':1/2') && attempts.filter((item) => item === uuid).length === 1) throw new Error('part failed');
+    } },
+  });
+  await createReminderScheduler(dependencies).runNow(NOW);
+  await createReminderScheduler({
+    ...dependencies,
+    store: createJsonStore({ path, defaultValue: { reminderRuns: {}, confirmations: {} } }),
+  }).runNow(NOW);
+
+  assert.equal(attempts.filter((uuid) => uuid === 'owner:2026-07-14:ou_a:1/2').length, 2);
+  assert.equal(attempts.filter((uuid) => uuid === 'owner:2026-07-14:ou_a:2/2').length, 1);
+  assert.equal(attempts.filter((uuid) => uuid.startsWith('consent:')).length, 1);
+  assert.deepEqual((await dependencies.store.read()).reminderRuns['2026-07-14'].owner, {
+    'ou_a:1/2': 'sent', 'ou_a:2/2': 'sent',
+  });
 });

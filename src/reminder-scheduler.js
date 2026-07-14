@@ -1,8 +1,8 @@
 import { millisecondsUntilNextRun, shanghaiDayWindow } from './date-window.js';
 import {
   buildConsentCard,
-  buildLeaderSummaryCard,
-  buildOwnerReminderCard,
+  buildLeaderSummaryCards,
+  buildOwnerReminderCards,
   parseCardAction,
 } from './feishu-messenger.js';
 
@@ -68,18 +68,26 @@ export function createReminderScheduler({
     const plan = await reminderService.buildPlan(window);
 
     for (const owner of plan.owners) {
-      await sendOnce(dateKey, 'owner', owner.openId, () => messenger.sendCard(
-        owner.openId,
-        buildOwnerReminderCard(owner, dateKey),
-        `owner:${dateKey}:${owner.openId}`,
-      ));
+      const cards = buildOwnerReminderCards(owner, dateKey);
+      for (const [index, card] of cards.entries()) {
+        const part = `${index + 1}/${cards.length}`;
+        await sendOnce(dateKey, 'owner', `${owner.openId}:${part}`, () => messenger.sendCard(
+          owner.openId,
+          card,
+          `owner:${dateKey}:${owner.openId}:${part}`,
+        ));
+      }
     }
     for (const leader of plan.leaders) {
-      await sendOnce(dateKey, 'leader', leader.openId, () => messenger.sendCard(
-        leader.openId,
-        buildLeaderSummaryCard(leader),
-        `leader:${dateKey}:${leader.openId}`,
-      ));
+      const cards = buildLeaderSummaryCards(leader);
+      for (const [index, card] of cards.entries()) {
+        const part = `${index + 1}/${cards.length}`;
+        await sendOnce(dateKey, 'leader', `${leader.openId}:${part}`, () => messenger.sendCard(
+          leader.openId,
+          card,
+          `leader:${dateKey}:${leader.openId}:${part}`,
+        ));
+      }
     }
     for (const owner of plan.owners) {
       await sendOnce(dateKey, 'consent', owner.openId, () => messenger.sendCard(
@@ -98,6 +106,8 @@ export function createReminderScheduler({
       timer = undefined;
       try {
         await runNow(clock());
+      } catch (error) {
+        logger.error('Reminder run failed', { error });
       } finally {
         schedule();
       }
@@ -149,8 +159,31 @@ export function createReminderScheduler({
         selector: { recordId: parsed.taskId },
         fields: { ...actionIntent.fields },
       }, parsed.actorOpenId);
+
+      if (parsed.action === 'block' || parsed.action === 'postpone') {
+        const text = parsed.action === 'block'
+          ? `请继续发送：阻塞任务 ${parsed.taskId}，阻塞原因：等待接口。`
+          : `请继续发送：延期任务 ${parsed.taskId}，新截止日期：2026-07-20。`;
+        await messenger.sendText(
+          parsed.actorOpenId,
+          text,
+          `callback-help:${messageId}:${parsed.action}:${parsed.taskId}:${parsed.actorOpenId}`,
+        );
+        await finish(key, true);
+        return { kind: 'result', text };
+      }
+
+      if (result?.kind !== 'confirmation' || typeof result.confirmationId !== 'string') {
+        throw new Error('Task action did not produce a confirmation');
+      }
+      const currentTask = await base.getTask(parsed.taskId);
+      if (!currentTask || currentTask.ownerOpenId !== parsed.actorOpenId) {
+        await finish(key, false);
+        return { kind: 'ignored', reason: 'forbidden' };
+      }
+      const confirmed = await taskService.confirm(result.confirmationId, parsed.actorOpenId);
       await finish(key, true);
-      return result;
+      return confirmed;
     } catch (error) {
       await finish(key, false);
       throw error;

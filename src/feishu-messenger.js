@@ -6,6 +6,8 @@ function ensureSuccess(response, operation) {
 
 const OWNER_ACTIONS = ['complete', 'continue', 'block', 'postpone'];
 const CONSENT_ACTIONS = ['consent_chat_summary', 'decline_chat_summary'];
+const MAX_CARD_COMPONENTS = 190;
+const MAX_CARD_BYTES = 28 * 1024;
 
 function plainText(content) {
   return { tag: 'plain_text', content };
@@ -25,6 +27,36 @@ function taskMarkdown(task, ownerName) {
   const deadline = task.deadline ? new Date(task.deadline).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未设置';
   const blocker = task.blocker || '无';
   return `**${task.name}**${owner}\n状态：${task.status || '未设置'}\n截止时间：${deadline}\n阻塞原因：${blocker}`;
+}
+
+export function countTaggedComponents(value) {
+  if (Array.isArray(value)) return value.reduce((total, item) => total + countTaggedComponents(item), 0);
+  if (!value || typeof value !== 'object') return 0;
+  return (typeof value.tag === 'string' ? 1 : 0)
+    + Object.values(value).reduce((total, item) => total + countTaggedComponents(item), 0);
+}
+
+function cardFits(card) {
+  return countTaggedComponents(card) <= MAX_CARD_COMPONENTS
+    && Buffer.byteLength(JSON.stringify(card), 'utf8') <= MAX_CARD_BYTES;
+}
+
+function splitCompleteEntries(entries, buildCard) {
+  const cards = [];
+  let current = [];
+  for (const entry of entries) {
+    const candidate = buildCard([...current, entry]);
+    if (cardFits(candidate)) {
+      current.push(entry);
+      continue;
+    }
+    if (current.length === 0) throw new Error('A single card entry exceeds the safe Card 2.0 limits');
+    cards.push(buildCard(current));
+    current = [entry];
+    if (!cardFits(buildCard(current))) throw new Error('A single card entry exceeds the safe Card 2.0 limits');
+  }
+  if (current.length > 0) cards.push(buildCard(current));
+  return cards;
 }
 
 export function buildOwnerReminderCard(owner, dateKey) {
@@ -53,6 +85,10 @@ export function buildOwnerReminderCard(owner, dateKey) {
   };
 }
 
+export function buildOwnerReminderCards(owner, dateKey) {
+  return splitCompleteEntries(owner.tasks, (tasks) => buildOwnerReminderCard({ ...owner, tasks }, dateKey));
+}
+
 export function buildLeaderSummaryCard(leader) {
   return {
     schema: '2.0',
@@ -65,6 +101,18 @@ export function buildLeaderSummaryCard(leader) {
       }))),
     },
   };
+}
+
+export function buildLeaderSummaryCards(leader) {
+  const entries = leader.owners.flatMap((owner) => owner.tasks.map((task) => ({ owner, task })));
+  return splitCompleteEntries(entries, (parts) => buildLeaderSummaryCard({
+    ...leader,
+    owners: parts.map(({ owner, task }) => ({
+      openId: owner.openId,
+      name: owner.name,
+      tasks: [task],
+    })),
+  }));
 }
 
 export function buildConsentCard() {

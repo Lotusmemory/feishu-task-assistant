@@ -2,8 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildConsentCard,
+  buildLeaderSummaryCards,
   buildLeaderSummaryCard,
+  buildOwnerReminderCards,
   buildOwnerReminderCard,
+  countTaggedComponents,
   createFeishuMessenger,
   parseCardAction,
 } from '../src/feishu-messenger.js';
@@ -87,6 +90,20 @@ test('builds a Card 2.0 owner reminder with four callbacks per task', () => {
   ]);
 });
 
+test('splits owner tasks without exceeding component and UTF-8 byte limits', () => {
+  const tasks = Array.from({ length: 17 }, (_, index) => ({
+    recordId: `rec${index}`, name: `任务${index}`, status: '进行中', deadline: 1_784_041_200_000, blocker: '',
+  }));
+  const cards = buildOwnerReminderCards({ openId: 'ou_a', tasks }, '2026-07-14');
+
+  assert.ok(cards.length > 1);
+  assert.equal(cards.reduce((total, card) => total + card.body.elements.length, 0), 17);
+  for (const card of cards) {
+    assert.ok(countTaggedComponents(card) <= 190);
+    assert.ok(Buffer.byteLength(JSON.stringify(card), 'utf8') <= 28 * 1024);
+  }
+});
+
 test('builds a blue read-only leader card without interactive fields', () => {
   const card = buildLeaderSummaryCard({
     openId: 'ou_l',
@@ -102,6 +119,24 @@ test('builds a blue read-only leader card without interactive fields', () => {
   assert.match(serialized, /已阻塞/);
   assert.match(serialized, /等待接口/);
   assert.doesNotMatch(serialized, /"(?:button|behaviors|action)"/);
+});
+
+test('splits large leader summaries on complete owner/task entries', () => {
+  const tasks = Array.from({ length: 10 }, (_, index) => ({
+    recordId: `rec${index}`, name: `任务${index}`, status: '已阻塞', deadline: 1_784_041_200_000,
+    blocker: `阻塞${index}${'很长'.repeat(2_000)}`,
+  }));
+  const cards = buildLeaderSummaryCards({
+    openId: 'ou_l', owners: [{ openId: 'ou_a', name: '张三', tasks }],
+  });
+
+  assert.ok(cards.length > 1);
+  assert.equal(cards.reduce((total, card) => total + card.body.elements.length, 0), 10);
+  for (const card of cards) {
+    assert.ok(countTaggedComponents(card) <= 190);
+    assert.ok(Buffer.byteLength(JSON.stringify(card), 'utf8') <= 28 * 1024);
+    assert.doesNotMatch(JSON.stringify(card), /"(?:button|behaviors|action)"/);
+  }
 });
 
 test('builds a blue consent card with only the two consent callback values', () => {

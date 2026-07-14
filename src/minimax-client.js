@@ -20,6 +20,9 @@ export function createMiniMaxClient({ apiKey, baseUrl, model, fetchImpl = fetch,
   }
 
   return {
+    async completeWithSystem(system, prompt) {
+      return complete([{ role: 'system', content: system }, { role: 'user', content: prompt }]);
+    },
     async answer(prompt) {
       return complete([{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: prompt }]);
     },

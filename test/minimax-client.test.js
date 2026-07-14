@@ -25,6 +25,25 @@ test('normalizes HTTP and empty-answer failures', async () => {
   await assert.rejects(() => emptyClient.answer('x'), /MiniMax request failed/);
 });
 
+test('completes with exactly the supplied system and user messages', async () => {
+  let body;
+  const client = createMiniMaxClient({ ...options, fetchImpl: async (_url, init) => {
+    body = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ choices: [{ message: { content: '  结果  ' } }] }) };
+  }});
+
+  assert.equal(await client.completeWithSystem('系统', '输入'), '结果');
+  assert.deepEqual(body.messages, [
+    { role: 'system', content: '系统' },
+    { role: 'user', content: '输入' },
+  ]);
+});
+
+test('normalizes controlled completion failures', async () => {
+  const client = createMiniMaxClient({ ...options, fetchImpl: async () => ({ ok: false, status: 503 }) });
+  await assert.rejects(() => client.completeWithSystem('系统', '输入'), /MiniMax request failed/);
+});
+
 test('sends approved knowledge with strict grounding instructions', async () => {
   let body;
   const client = createMiniMaxClient({ ...options, fetchImpl: async (_url, init) => {

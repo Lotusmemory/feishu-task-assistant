@@ -79,9 +79,16 @@ function explicitEditFormIntent(text) {
 }
 
 function explicitMyTasksIntent(text) {
-  return /(?:帮我)?(?:查看|查询|盘点|列出)(?:一下)?我的任务/.test(text)
-    ? { operation: 'query_tasks', selector: { ownerOpenId: 'me' }, fields: {} }
+  if (/(?:帮我)?(?:查看|查询|盘点|列出)(?:一下)?我的任务/.test(text)) {
+    return { operation: 'query_tasks', selector: { ownerOpenId: 'me' }, fields: {} };
+  }
+  return /^(?:帮我)?(?:任务盘点|盘点(?:一下)?任务)$/.test(text.trim())
+    ? { operation: 'query_tasks', selector: {}, fields: {} }
     : null;
+}
+
+function hasTaskDomainCue(text) {
+  return /任务|待办|截止(?:日期|时间)?|优先级|负责人|协作人|进度|阻塞|延期/.test(text);
 }
 
 function isObject(value) {
@@ -95,6 +102,10 @@ function isFieldValue(value) {
 
 export function createTaskIntentParser({ minimax, clock = Date.now }) {
   return {
+    isLikelyTask(text) {
+      return hasTaskDomainCue(text);
+    },
+
     async parse(text) {
       const explicit = explicitCreateIntent(text, clock);
       if (explicit) return explicit;
@@ -106,6 +117,7 @@ export function createTaskIntentParser({ minimax, clock = Date.now }) {
       if (editForm) return editForm;
       const myTasks = explicitMyTasksIntent(text);
       if (myTasks) return myTasks;
+      if (!hasTaskDomainCue(text)) return null;
 
       let candidate;
       try {

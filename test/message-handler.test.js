@@ -19,6 +19,40 @@ test('answers a valid message once', async () => {
   assert.deepEqual(calls, ['你好', ['om_1', '您好']]);
 });
 
+test('immediately shows a knowledge lookup card and updates it with the answer', async () => {
+  const calls = [];
+  const scheduled = [];
+  let answerCalls = 0;
+  const handler = createMessageHandler({
+    assistant: { answer: async () => { answerCalls += 1; return '账号开通后即可使用。'; } },
+    reply: async () => calls.push(['text']),
+    replyCard: async (messageId, card) => {
+      calls.push(['card', messageId, card]);
+      return { message_id: 'om_knowledge_card' };
+    },
+    messenger: { async updateCard(messageId, card) { calls.push(['update', messageId, card]); } },
+    schedule(fn, delay) { scheduled.push([fn, delay]); },
+    deduplicator: createDeduplicator(), logger: { error() {} },
+  });
+
+  await handler(event());
+
+  assert.equal(answerCalls, 0);
+  assert.equal(calls[0][0], 'card');
+  assert.equal(calls[0][1], 'om_1');
+  assert.equal(calls[0][2].header.title.content, '正在查询知识');
+  assert.match(calls[0][2].body.elements[0].content, /请稍候/);
+  assert.equal(scheduled[0][1], 100);
+
+  await scheduled[0][0]();
+
+  assert.equal(answerCalls, 1);
+  assert.equal(calls[1][0], 'update');
+  assert.equal(calls[1][1], 'om_knowledge_card');
+  assert.equal(calls[1][2].header.title.content, '知识助手');
+  assert.equal(calls[1][2].body.elements[0].content, '账号开通后即可使用。');
+});
+
 test('ignores bot and non-triggering messages', async () => {
   let calls = 0;
   const handler = createMessageHandler({
@@ -59,6 +93,111 @@ test('routes a parsed task intent without calling the RAG assistant', async () =
   ]);
 });
 
+test('shows task understanding and operation cards before parsing and preparing', async () => {
+  const calls = [];
+  const scheduled = [];
+  let parseCalls = 0;
+  let prepareCalls = 0;
+  const handler = createMessageHandler({
+    taskIntent: {
+      isLikelyTask() { return true; },
+      async parse() {
+        parseCalls += 1;
+        calls.push('parse');
+        return { operation: 'delete_task', selector: { name: '旧任务' }, fields: {} };
+      },
+    },
+    taskService: {
+      async prepare() {
+        prepareCalls += 1;
+        calls.push('prepare');
+        return { kind: 'confirmation', confirmationId: 'cfm-delete', preview: { operation: 'delete_task' } };
+      },
+    },
+    assistant: { async answer() { return 'unused'; } },
+    reply: async () => calls.push('text'),
+    replyCard: async (messageId, card) => {
+      calls.push(['replyCard', messageId, card]);
+      return { message_id: 'om_task_processing' };
+    },
+    messenger: { async updateCard(messageId, card) { calls.push(['updateCard', messageId, card]); } },
+    schedule(fn, delay) { scheduled.push([fn, delay]); },
+    deduplicator: createDeduplicator(), logger: { error() {} },
+  });
+
+  await handler(event({ content: '{"text":"帮我删除任务旧任务"}' }));
+
+  assert.equal(parseCalls, 0);
+  assert.equal(prepareCalls, 0);
+  assert.equal(calls[0][0], 'replyCard');
+  assert.equal(calls[0][2].header.title.content, '正在理解任务请求');
+  assert.equal(scheduled[0][1], 100);
+
+  await scheduled[0][0]();
+
+  assert.equal(parseCalls, 1);
+  assert.equal(prepareCalls, 1);
+  assert.equal(calls[2][0], 'updateCard');
+  assert.equal(calls[2][2].header.title.content, '正在准备删除任务');
+  assert.equal(calls[4][0], 'updateCard');
+  assert.match(JSON.stringify(calls[4][2]), /confirm_task_change/);
+});
+
+test('shows a task scope choice card for a leader review', async () => {
+  const calls = [];
+  const handler = createMessageHandler({
+    taskIntent: { async parse() { return { operation: 'query_tasks', selector: {}, fields: {} }; } },
+    taskService: { async prepare() { return { kind: 'task_scope_choice', text: '请选择任务盘点范围。' }; } },
+    assistant: { async answer() { return 'unused'; } },
+    reply: async () => calls.push(['text']),
+    replyCard: async (messageId, card) => calls.push(['card', messageId, card]),
+    deduplicator: createDeduplicator(), logger: { error() {} },
+  });
+
+  await handler(event({ content: '{"text":"任务盘点"}' }));
+
+  assert.equal(calls[0][0], 'card');
+  assert.equal(calls[0][1], 'om_1');
+  assert.equal(calls[0][2].header.title.content, '选择任务盘点范围');
+});
+
+test('immediately shows a task review card and updates it with the result', async () => {
+  const calls = [];
+  const scheduled = [];
+  let prepareCalls = 0;
+  const handler = createMessageHandler({
+    taskIntent: { async parse() { return { operation: 'query_tasks', selector: { ownerOpenId: 'me' }, fields: {} }; } },
+    taskService: { async prepare() {
+      prepareCalls += 1;
+      return { kind: 'task_list', tasks: [{ recordId: 'rec1', name: '进行中事项', status: '进行中' }] };
+    } },
+    assistant: { async answer() { return 'unused'; } },
+    reply: async () => calls.push(['text']),
+    replyCard: async (messageId, card) => {
+      calls.push(['card', messageId, card]);
+      return { message_id: 'om_task_review' };
+    },
+    messenger: { async updateCard(messageId, card) { calls.push(['update', messageId, card]); } },
+    schedule(fn, delay) { scheduled.push([fn, delay]); },
+    deduplicator: createDeduplicator(), logger: { error() {} },
+  });
+
+  await handler(event({ content: '{"text":"任务盘点"}' }));
+
+  assert.equal(prepareCalls, 0);
+  assert.equal(calls[0][0], 'card');
+  assert.equal(calls[0][2].header.title.content, '正在盘点任务');
+  assert.equal(scheduled[0][1], 100);
+
+  await scheduled[0][0]();
+
+  assert.equal(prepareCalls, 1);
+  assert.equal(calls[1][0], 'update');
+  assert.equal(calls[1][1], 'om_task_review');
+  assert.equal(calls[1][2].header.title.content, '我的任务盘点');
+  assert.match(JSON.stringify(calls[1][2]), /进行中事项/);
+});
+
 test('replies with a task confirmation card when card replies are available', async () => {
   const calls = [];
   const handler = createMessageHandler({
@@ -86,12 +225,80 @@ test('handles task confirmation card callbacks for the clicking actor', async ()
     context: { open_message_id: 'om_card' },
     action: { value: { action: 'confirm_task_change', confirmationId: 'cfm-1' } },
   });
-  assert.deepEqual(calls[0], ['cfm-1', 'ou_actor']);
-  assert.equal(calls[1][0], 'updateCard');
-  assert.equal(calls[1][1], 'om_card');
-  assert.equal(calls[1][2].header.template, 'green');
+  assert.equal(calls[0][0], 'updateCard');
+  assert.equal(calls[0][2].header.title.content, '正在执行任务操作');
+  assert.deepEqual(calls[1], ['cfm-1', 'ou_actor']);
+  assert.equal(calls[2][0], 'updateCard');
+  assert.equal(calls[2][1], 'om_card');
+  assert.equal(calls[2][2].header.template, 'green');
   assert.equal(result, undefined);
-  assert.doesNotMatch(JSON.stringify(calls[1][2]), /button|callback/);
+  assert.doesNotMatch(JSON.stringify(calls[2][2]), /button|callback/);
+});
+
+test('disables a confirmation card while the task operation is executing', async () => {
+  const calls = [];
+  const handle = createTaskConfirmationActionHandler({
+    taskService: {
+      async confirm(id, actor) {
+        calls.push(['confirm', id, actor]);
+        return { kind: 'result', text: '操作成功。' };
+      },
+    },
+    messenger: { async updateCard(messageId, card) { calls.push(['updateCard', messageId, card]); } },
+  });
+
+  await handle({
+    operator: { open_id: 'ou_actor' }, context: { open_message_id: 'om_confirm' },
+    action: { value: { action: 'confirm_task_change', confirmationId: 'cfm-1' } },
+  });
+
+  assert.equal(calls[0][0], 'updateCard');
+  assert.equal(calls[0][2].header.title.content, '正在执行任务操作');
+  assert.doesNotMatch(JSON.stringify(calls[0][2]), /button|callback/);
+  assert.deepEqual(calls[1], ['confirm', 'cfm-1', 'ou_actor']);
+  assert.equal(calls[2][2].header.title.content, '任务操作已确认');
+});
+
+test('replaces a confirmation processing card with a failure result', async () => {
+  const calls = [];
+  const handle = createTaskConfirmationActionHandler({
+    taskService: { async confirm() { throw new Error('base unavailable'); } },
+    messenger: { async updateCard(messageId, card) { calls.push([messageId, card]); } },
+    logger: { error() {} },
+  });
+  const callback = {
+    operator: { open_id: 'ou_actor' }, context: { open_message_id: 'om_confirm' },
+    action: { value: { action: 'confirm_task_change', confirmationId: 'cfm-1' } },
+  };
+
+  await assert.rejects(() => handle(callback), /base unavailable/);
+
+  assert.equal(calls[0][1].header.title.content, '正在执行任务操作');
+  assert.equal(calls[1][1].header.title.content, '任务操作失败');
+});
+
+test('queries the selected leader task scope and updates the choice card', async () => {
+  const calls = [];
+  const handle = createTaskConfirmationActionHandler({
+    taskService: { async queryScope(scope, actor) {
+      calls.push(['queryScope', scope, actor]);
+      return { kind: 'task_list', tasks: [{ recordId: 'rec1', name: '首页设计', ownerName: '张三' }] };
+    } },
+    messenger: { async updateCard(messageId, card) { calls.push(['updateCard', messageId, card]); } },
+  });
+
+  await handle({
+    operator: { open_id: 'ou_leader' }, context: { open_message_id: 'om_scope' },
+    action: { value: { action: 'query_task_scope', scope: 'all' } },
+  });
+
+  assert.equal(calls[0][0], 'updateCard');
+  assert.equal(calls[0][1], 'om_scope');
+  assert.equal(calls[0][2].header.title.content, '正在盘点任务');
+  assert.deepEqual(calls[1], ['queryScope', 'all', 'ou_leader']);
+  assert.equal(calls[2][0], 'updateCard');
+  assert.equal(calls[2][1], 'om_scope');
+  assert.equal(calls[2][2].header.title.content, '全部成员任务盘点');
 });
 
 test('schedules form result update after the card callback can return', async () => {
@@ -103,7 +310,10 @@ test('schedules form result update after the card callback can return', async ()
   };
   const handle = createTaskConfirmationActionHandler({
     taskService,
-    messenger: { async updateCardByToken(token) { calls.push(['update', token]); } },
+    messenger: {
+      async updateCard(messageId, card) { calls.push(['processing', messageId, card]); },
+      async updateCardByToken(token) { calls.push(['update', token]); },
+    },
     schedule(fn, delay) { scheduled.push([fn, delay]); },
     logger: { error() {} },
   });
@@ -112,11 +322,48 @@ test('schedules form result update after the card callback can return', async ()
     action: { name: 'submit_edit__rec1', form_value: { task_name: '喝水', status: '进行中', progress: '20' } },
   });
   assert.equal(result, undefined);
-  assert.deepEqual(calls, ['confirm']);
+  assert.equal(calls[0][0], 'processing');
+  assert.equal(calls[0][1], 'om_1');
+  assert.match(JSON.stringify(calls[0][2]), /正在保存任务修改/);
+  assert.deepEqual(calls.slice(1), ['confirm']);
   assert.equal(scheduled.length, 1);
   assert.equal(scheduled[0][1], 100);
   await scheduled[0][0]();
-  assert.deepEqual(calls, ['confirm', ['update', 'token-1']]);
+  assert.deepEqual(calls.slice(1), ['confirm', ['update', 'token-1']]);
+});
+
+test('ignores repeated submissions from the same task edit card while saving', async () => {
+  const calls = [];
+  const scheduled = [];
+  let releaseConfirm;
+  const confirmPending = new Promise((resolve) => { releaseConfirm = resolve; });
+  const taskService = {
+    async prepare() { calls.push('prepare'); return { kind: 'confirmation', confirmationId: 'cfm-1' }; },
+    async confirm() { calls.push('confirm'); await confirmPending; return { kind: 'result', text: '操作成功。' }; },
+  };
+  const handle = createTaskConfirmationActionHandler({
+    taskService,
+    messenger: {
+      async updateCard(messageId) { calls.push(['processing', messageId]); },
+      async updateCardByToken(token) { calls.push(['result', token]); },
+    },
+    schedule(fn) { scheduled.push(fn); },
+  });
+  const event = {
+    token: 'token-1', operator: { open_id: 'ou_actor' }, context: { open_message_id: 'om_1' },
+    action: { name: 'submit_edit__rec1', form_value: { task_name: '喝水', status: '进行中', progress: '20' } },
+  };
+
+  const first = handle(event);
+  await new Promise((resolve) => setImmediate(resolve));
+  await handle(event);
+
+  assert.equal(calls.filter((call) => call === 'prepare').length, 1);
+  assert.equal(calls.filter((call) => call === 'confirm').length, 1);
+  releaseConfirm();
+  await first;
+  await scheduled[0]();
+  assert.equal(calls.filter((call) => Array.isArray(call) && call[0] === 'result').length, 1);
 });
 
 test('keeps the existing RAG route when task parsing returns null', async () => {
@@ -260,6 +507,42 @@ test('turns a create form submission into a confirmation card', async () => {
   assert.equal(calls[2][0], 'update');
   assert.equal(calls[2][1], 'token-1');
   assert.match(JSON.stringify(calls[2][2]), /confirm_task_change/);
+});
+
+test('ignores repeated submissions from the same task create card while preparing', async () => {
+  const calls = [];
+  const scheduled = [];
+  let releasePrepare;
+  const preparePending = new Promise((resolve) => { releasePrepare = resolve; });
+  const handle = createTaskConfirmationActionHandler({
+    taskService: {
+      async prepare() {
+        calls.push('prepare');
+        await preparePending;
+        return { kind: 'confirmation', confirmationId: 'cfm-create', preview: {} };
+      },
+    },
+    messenger: {
+      async updateCard(messageId) { calls.push(['processing', messageId]); },
+      async updateCardByToken(token) { calls.push(['result', token]); },
+    },
+    schedule(fn) { scheduled.push(fn); },
+  });
+  const event = {
+    token: 'token-create', operator: { open_id: 'ou_actor' }, context: { open_message_id: 'om_create' },
+    action: { name: 'submit_create_task', form_value: { task_name: '喝水', priority: 'P1' } },
+  };
+
+  const first = handle(event);
+  await new Promise((resolve) => setImmediate(resolve));
+  await handle(event);
+
+  assert.equal(calls.filter((call) => call === 'prepare').length, 1);
+  assert.equal(calls.filter((call) => Array.isArray(call) && call[0] === 'processing').length, 1);
+  releasePrepare();
+  await first;
+  await scheduled[0]();
+  assert.equal(calls.filter((call) => Array.isArray(call) && call[0] === 'result').length, 1);
 });
 
 test('turns a delegated create form submission into an owner-specific confirmation card', async () => {

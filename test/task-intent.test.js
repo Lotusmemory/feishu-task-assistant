@@ -28,10 +28,30 @@ test('accepts a create task candidate with only known keys', async () => {
     operation: 'create_task', selector: {},
     fields: { 任务名: '首页设计', 截止日期: '2026-07-17 18:00', 优先级: 'P1' },
   }) };
-  assert.deepEqual(await createTaskIntentParser({ minimax }).parse('帮我处理一下'), {
+  assert.deepEqual(await createTaskIntentParser({ minimax }).parse('帮我处理一下这个任务'), {
     operation: 'create_task', selector: {},
     fields: { 任务名: '首页设计', 截止日期: '2026-07-17 18:00', 优先级: 'P1' },
   });
+});
+
+test('does not let the model turn a general assistant question into a task query', async () => {
+  let modelCalls = 0;
+  const minimax = { async completeWithSystem() {
+    modelCalls += 1;
+    return JSON.stringify({ operation: 'query_tasks', selector: { ownerOpenId: 'me' }, fields: {} });
+  } };
+
+  assert.equal(await createTaskIntentParser({ minimax }).parse('这个助手怎么用'), null);
+  assert.equal(modelCalls, 0);
+});
+
+test('identifies likely task requests without calling the model', () => {
+  const parser = createTaskIntentParser({
+    minimax: { async completeWithSystem() { throw new Error('should not be called'); } },
+  });
+
+  assert.equal(parser.isLikelyTask('帮我创建一个任务'), true);
+  assert.equal(parser.isLikelyTask('公司的报销流程是什么？'), false);
 });
 
 test('parses an explicit Chinese create command without calling the model', async () => {
@@ -128,6 +148,9 @@ test('parses a my-tasks review without calling the model', async () => {
   const parser = createTaskIntentParser({ minimax: { async completeWithSystem() { throw new Error('unused'); } } });
   assert.deepEqual(await parser.parse('帮我盘点一下我的任务'), {
     operation: 'query_tasks', selector: { ownerOpenId: 'me' }, fields: {},
+  });
+  assert.deepEqual(await parser.parse('任务盘点'), {
+    operation: 'query_tasks', selector: {}, fields: {},
   });
 });
 

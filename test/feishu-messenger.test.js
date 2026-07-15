@@ -2,12 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildConsentCard,
+  buildKnowledgeAnswerCard,
   buildChatSummaryStatusCard,
   buildTaskConfirmationCard,
   buildTaskConfirmationResultCard,
   buildTaskCreateCard,
+  buildTaskCreateProcessingCard,
+  buildTaskIntentProcessingCard,
+  buildTaskOperationProcessingCard,
+  buildTaskConfirmationProcessingCard,
   buildTaskEditCard,
+  buildTaskEditProcessingCard,
   buildTaskEditPickerCard,
+  buildTaskScopeChoiceCard,
+  buildTaskReviewProcessingCard,
   buildMyTasksCard,
   buildLeaderSummaryCards,
   buildLeaderSummaryCard,
@@ -21,6 +29,7 @@ import {
   parseTaskCreateFormAction,
   parseTaskEditFormAction,
   parseTaskEditSelectionAction,
+  parseTaskScopeSelectionAction,
   parseReminderReasonAction,
 } from '../src/feishu-messenger.js';
 
@@ -100,6 +109,16 @@ test('replies to an existing message with an interactive card', async () => {
   }]]);
 });
 
+test('builds a read-only knowledge answer card', () => {
+  const card = buildKnowledgeAnswerCard('账号开通后即可使用。');
+
+  assert.equal(card.schema, '2.0');
+  assert.equal(card.header.title.content, '知识助手');
+  assert.equal(card.header.template, 'blue');
+  assert.equal(card.body.elements[0].content, '账号开通后即可使用。');
+  assert.doesNotMatch(JSON.stringify(card), /button|callback/);
+});
+
 test('updates an existing interactive card', async () => {
   const { messenger, calls } = fixture();
   const card = { schema: '2.0', body: { elements: [] } };
@@ -144,6 +163,16 @@ test('builds a read-only result card after confirmation', () => {
   assert.doesNotMatch(JSON.stringify(card), /button|callback|confirmationId/);
 });
 
+test('distinguishes a failed task operation from a cancellation', () => {
+  const failed = buildTaskConfirmationResultCard('保存失败，请重新打开任务后再试。');
+  const cancelled = buildTaskConfirmationResultCard('操作已取消。');
+
+  assert.equal(failed.header.template, 'red');
+  assert.equal(failed.header.title.content, '任务操作失败');
+  assert.equal(cancelled.header.template, 'grey');
+  assert.equal(cancelled.header.title.content, '任务操作已取消');
+});
+
 test('builds and parses a prefilled task edit form', () => {
   const card = buildTaskEditCard({ recordId: 'rec1', name: '喝水', status: '进行中', priority: 'P1', progress: 20, tags: ['其他'] });
   const serialized = JSON.stringify(card);
@@ -154,6 +183,15 @@ test('builds and parses a prefilled task edit form', () => {
     operator: { open_id: 'ou_actor' },
     action: { name: 'submit_edit__rec1', form_value: { task_name: '喝水', status: '进行中' } },
   }), { actorOpenId: 'ou_actor', recordId: 'rec1', values: { task_name: '喝水', status: '进行中' } });
+});
+
+test('builds a read-only processing card while a task edit is being saved', () => {
+  const card = buildTaskEditProcessingCard('喝水');
+  const serialized = JSON.stringify(card);
+
+  assert.equal(card.header.title.content, '正在保存任务修改');
+  assert.match(serialized, /喝水/);
+  assert.doesNotMatch(serialized, /button|submit_edit|callback/);
 });
 
 test('builds and parses a task edit picker card', () => {
@@ -182,6 +220,26 @@ test('builds and parses a task create form', () => {
   }), { actorOpenId: 'ou_actor', values: { task_name: '喝水', priority: 'P1' }, fields: {} });
 });
 
+test('builds a read-only processing card while a task is being created', () => {
+  const card = buildTaskCreateProcessingCard('喝水');
+  const serialized = JSON.stringify(card);
+
+  assert.equal(card.header.title.content, '正在创建任务');
+  assert.match(serialized, /喝水/);
+  assert.doesNotMatch(serialized, /button|submit_create_task|callback/);
+});
+
+test('builds read-only task understanding and operation processing cards', () => {
+  const understanding = buildTaskIntentProcessingCard();
+  const preparing = buildTaskOperationProcessingCard('delete_task');
+  const confirming = buildTaskConfirmationProcessingCard('confirm_task_change');
+
+  assert.equal(understanding.header.title.content, '正在理解任务请求');
+  assert.equal(preparing.header.title.content, '正在准备删除任务');
+  assert.equal(confirming.header.title.content, '正在执行任务操作');
+  assert.doesNotMatch(JSON.stringify([understanding, preparing, confirming]), /button|callback/);
+});
+
 test('preserves delegated owner in a task create form', () => {
   const card = buildTaskCreateCard({ 负责人: '田嘉国' });
   const serialized = JSON.stringify(card);
@@ -200,6 +258,29 @@ test('builds a card for my task review', () => {
   assert.equal(card.header.title.content, '我的任务盘点');
   assert.match(JSON.stringify(card), /喝水/);
   assert.match(JSON.stringify(card), /进行中/);
+});
+
+test('builds and parses a leader task scope choice card', () => {
+  const card = buildTaskScopeChoiceCard();
+  const buttons = card.body.elements[1].columns[0].elements;
+
+  assert.equal(card.header.title.content, '选择任务盘点范围');
+  assert.deepEqual(buttons.map((button) => button.behaviors[0].value), [
+    { action: 'query_task_scope', scope: 'self' },
+    { action: 'query_task_scope', scope: 'all' },
+  ]);
+  assert.deepEqual(parseTaskScopeSelectionAction({
+    operator: { open_id: 'ou_leader' },
+    action: { value: { action: 'query_task_scope', scope: 'all' } },
+  }), { actorOpenId: 'ou_leader', scope: 'all' });
+});
+
+test('builds a read-only task review processing card', () => {
+  const card = buildTaskReviewProcessingCard();
+
+  assert.equal(card.header.title.content, '正在盘点任务');
+  assert.match(card.body.elements[0].content, /请稍候/);
+  assert.doesNotMatch(JSON.stringify(card), /button|callback/);
 });
 
 test('throws a sanitized error for a nonzero Feishu response code', async () => {

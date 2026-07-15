@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createTaskService } from '../src/task-service.js';
 
-function fixture({ tasks = [], members = [], baseOverrides = {} } = {}) {
+function fixture({ tasks = [], members = [], leaders = [], baseOverrides = {} } = {}) {
   const writes = [];
   const actions = new Map();
   let sequence = 0;
@@ -38,7 +38,10 @@ function fixture({ tasks = [], members = [], baseOverrides = {} } = {}) {
   return {
     service: createTaskService({
       base,
-      members: { async resolveByName(name) { return members.filter((member) => member.name === name); } },
+      members: {
+        async resolveByName(name) { return members.filter((member) => member.name === name); },
+        async isLeader(openId) { return leaders.includes(openId); },
+      },
       confirmations,
       clock: () => 1_784_000_000_000,
     }),
@@ -52,13 +55,13 @@ const task = {
   status: '进行中', progress: 60, deadline: 1_784_041_200_000, blocker: '', priority: 'P1',
 };
 
-test('queries tasks without creating a confirmation or writing Base', async () => {
+test('binds a task query to the current sender when the model omits an owner', async () => {
   const { service, base, writes } = fixture({ tasks: [task] });
   const result = await service.prepare({ operation: 'query_tasks', selector: { name: '首页' }, fields: {} }, 'ou_actor');
 
   assert.equal(result.kind, 'task_list');
   assert.match(result.text, /首页设计/);
-  assert.deepEqual(base.selector, { name: '首页' });
+  assert.deepEqual(base.selector, { name: '首页', ownerOpenId: 'ou_actor' });
   assert.deepEqual(writes, []);
 });
 
@@ -66,6 +69,40 @@ test('binds a my-tasks query to the current Feishu sender', async () => {
   const { service, base } = fixture();
   await service.prepare({ operation: 'query_tasks', selector: { ownerOpenId: 'me' }, fields: {} }, 'ou_actor');
   assert.deepEqual(base.selector, { ownerOpenId: 'ou_actor' });
+});
+
+test('excludes completed tasks from every task review result', async () => {
+  const completed = { ...task, recordId: 'done', name: '已完成事项', status: '已完成' };
+  const { service } = fixture({ tasks: [task, completed] });
+
+  const result = await service.prepare({ operation: 'query_tasks', selector: { ownerOpenId: 'me' }, fields: {} }, 'ou_actor');
+
+  assert.equal(result.kind, 'task_list');
+  assert.deepEqual(result.tasks.map(({ recordId }) => recordId), ['rec1']);
+  assert.doesNotMatch(result.text, /已完成事项/);
+});
+
+test('asks a leader to choose the task review scope before querying Base', async () => {
+  const { service, base } = fixture({ leaders: ['ou_leader'] });
+
+  assert.deepEqual(
+    await service.prepare({ operation: 'query_tasks', selector: {}, fields: {} }, 'ou_leader'),
+    { kind: 'task_scope_choice', text: '请选择任务盘点范围。' },
+  );
+  assert.equal(base.selector, undefined);
+});
+
+test('allows only a leader to query all members through the explicit scope action', async () => {
+  const allowed = fixture({ tasks: [task], leaders: ['ou_leader'] });
+  const result = await allowed.service.queryScope('all', 'ou_leader');
+  assert.equal(result.kind, 'task_list');
+  assert.deepEqual(allowed.base.selector, {});
+
+  const denied = fixture({ tasks: [task] });
+  assert.deepEqual(await denied.service.queryScope('all', 'ou_actor'), {
+    kind: 'result', text: '仅 Leader 可以查看全部成员任务。',
+  });
+  assert.equal(denied.base.selector, undefined);
 });
 
 test('returns editable current-user tasks for an unspecified edit request', async () => {

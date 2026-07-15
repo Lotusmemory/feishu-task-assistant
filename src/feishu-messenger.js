@@ -154,6 +154,15 @@ export function buildChatSummaryStatusCard({ title = '聊天总结', text }) {
   };
 }
 
+export function buildKnowledgeAnswerCard(text, { title = '知识助手' } = {}) {
+  return {
+    schema: '2.0',
+    config: { width_mode: 'default', update_multi: true },
+    header: { template: 'blue', title: plainText(title), icon: { tag: 'standard_icon', token: 'ai_colorful' } },
+    body: { elements: [{ tag: 'markdown', content: truncateText(text, 4_000) }] },
+  };
+}
+
 function previewMarkdown(preview) {
   const fields = preview?.after || preview?.before || {};
   const lines = [];
@@ -193,12 +202,13 @@ export function buildTaskConfirmationCard(response) {
 
 export function buildTaskConfirmationResultCard(text) {
   const succeeded = text === '操作成功。';
+  const cancelled = text === '操作已取消。';
   return {
     schema: '2.0',
     config: { width_mode: 'default' },
     header: {
-      template: succeeded ? 'green' : 'grey',
-      title: plainText(succeeded ? '任务操作已确认' : '任务操作已取消'),
+      template: succeeded ? 'green' : cancelled ? 'grey' : 'red',
+      title: plainText(succeeded ? '任务操作已确认' : cancelled ? '任务操作已取消' : '任务操作失败'),
     },
     body: { elements: [{ tag: 'markdown', content: truncateText(text, 500) }] },
   };
@@ -258,6 +268,20 @@ export function buildTaskEditCard(task) {
   };
 }
 
+export function buildTaskEditProcessingCard(taskName) {
+  return {
+    schema: '2.0',
+    config: { width_mode: 'default', update_multi: true },
+    header: { template: 'blue', title: plainText('正在保存任务修改'), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
+    body: {
+      elements: [{
+        tag: 'markdown',
+        content: `正在保存“${truncateText(taskName || '未命名任务', 200)}”，请稍候…`,
+      }],
+    },
+  };
+}
+
 function createTaskContext(fields = {}) {
   const owner = typeof fields['负责人'] === 'string' && fields['负责人'].trim()
     ? encodeURIComponent(fields['负责人'].trim())
@@ -282,23 +306,98 @@ export function buildTaskCreateCard(fields = {}) {
   };
 }
 
-export function buildMyTasksCard(tasks) {
+export function buildTaskCreateProcessingCard(taskName) {
   return {
     schema: '2.0',
     config: { width_mode: 'default', update_multi: true },
-    header: { template: 'blue', title: plainText('我的任务盘点'), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
+    header: { template: 'blue', title: plainText('正在创建任务'), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
+    body: {
+      elements: [{
+        tag: 'markdown',
+        content: `正在处理“${truncateText(taskName || '未命名任务', 200)}”，请稍候…`,
+      }],
+    },
+  };
+}
+
+function buildTaskProcessingCard(title, text) {
+  return {
+    schema: '2.0',
+    config: { width_mode: 'default', update_multi: true },
+    header: { template: 'blue', title: plainText(title), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
+    body: { elements: [{ tag: 'markdown', content: text }] },
+  };
+}
+
+export function buildTaskIntentProcessingCard() {
+  return buildTaskProcessingCard('正在理解任务请求', '正在识别任务操作和关键信息，请稍候…');
+}
+
+export function buildTaskOperationProcessingCard(operation) {
+  const titles = {
+    create_task: '正在准备创建任务',
+    delete_task: '正在准备删除任务',
+    query_tasks: '正在盘点任务',
+    edit_task_form: '正在加载任务信息',
+  };
+  const title = titles[operation] || '正在准备修改任务';
+  return buildTaskProcessingCard(title, '正在核对任务信息，请稍候…');
+}
+
+export function buildTaskConfirmationProcessingCard(action) {
+  const cancelling = action === 'cancel_task_change';
+  return buildTaskProcessingCard(
+    cancelling ? '正在取消任务操作' : '正在执行任务操作',
+    cancelling ? '正在取消本次操作，请稍候…' : '正在写入任务数据，请勿重复提交…',
+  );
+}
+
+export function buildTaskReviewProcessingCard() {
+  return {
+    schema: '2.0',
+    config: { width_mode: 'default', update_multi: true },
+    header: { template: 'blue', title: plainText('正在盘点任务'), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
+    body: { elements: [{ tag: 'markdown', content: '正在查询任务，请稍候…' }] },
+  };
+}
+
+export function buildMyTasksCard(tasks, { title = '我的任务盘点', emptyText = '没有找到匹配的任务。', showOwner = false } = {}) {
+  const elements = tasks.length ? tasks.map((task) => ({
+    tag: 'interactive_container', width: 'fill', has_border: true, border_color: 'blue-100',
+    corner_radius: '8px', background_style: 'blue-50', padding: '12px', vertical_spacing: '4px',
+    elements: [
+      { tag: 'markdown', content: `**${truncateText(task.name, 200)}**` },
+      ...(showOwner ? [{ tag: 'markdown', content: `负责人：${truncateText(task.ownerName || '未指定', 100)}`, text_size: 'notation' }] : []),
+      { tag: 'markdown', content: `状态：${task.status || '未设置'}  ·  优先级：${task.priority || '未设置'}  ·  进度：${task.progress ?? 0}%` },
+      { tag: 'markdown', content: `截止时间：${task.deadline ? new Date(task.deadline).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未设置'}`, text_size: 'notation' },
+    ],
+  })) : [{ tag: 'markdown', content: emptyText }];
+  return {
+    schema: '2.0',
+    config: { width_mode: 'default', update_multi: true },
+    header: { template: 'blue', title: plainText(title), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
     body: {
       direction: 'vertical', padding: '12px 12px 20px 12px', vertical_spacing: '12px',
-      elements: tasks.map((task) => ({
-        tag: 'interactive_container', width: 'fill', has_border: true, border_color: 'blue-100',
-        corner_radius: '8px', background_style: 'blue-50', padding: '12px', vertical_spacing: '4px',
-        elements: [
-          { tag: 'markdown', content: `**${truncateText(task.name, 200)}**` },
-          { tag: 'markdown', content: `状态：${task.status || '未设置'}  ·  优先级：${task.priority || '未设置'}  ·  进度：${task.progress ?? 0}%` },
-          { tag: 'markdown', content: `截止时间：${task.deadline ? new Date(task.deadline).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未设置'}`, text_size: 'notation' },
-        ],
-      })),
+      elements,
     },
+  };
+}
+
+export function buildTaskScopeChoiceCard() {
+  return {
+    schema: '2.0',
+    config: { width_mode: 'default', update_multi: true },
+    header: { template: 'blue', title: plainText('选择任务盘点范围'), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
+    body: { elements: [
+      { tag: 'markdown', content: '请选择本次要查看的任务范围。' },
+      { tag: 'column_set', flex_mode: 'none', columns: [{
+        tag: 'column', width: 'weighted', weight: 1,
+        elements: [
+          callbackButton('仅看我负责的任务', 'primary_filled', { action: 'query_task_scope', scope: 'self' }),
+          callbackButton('查看全部成员任务', 'default', { action: 'query_task_scope', scope: 'all' }),
+        ],
+      }] },
+    ] },
   };
 }
 
@@ -381,6 +480,14 @@ export function parseTaskEditSelectionAction(event) {
   if (value.action !== 'edit_task') return null;
   if (typeof value.taskId !== 'string' || !value.taskId) return null;
   return { actorOpenId, taskId: value.taskId };
+}
+
+export function parseTaskScopeSelectionAction(event) {
+  const actorOpenId = event?.operator?.open_id;
+  const value = event?.action?.value;
+  if (typeof actorOpenId !== 'string' || !actorOpenId || !value || typeof value !== 'object') return null;
+  if (value.action !== 'query_task_scope' || !['self', 'all'].includes(value.scope)) return null;
+  return { actorOpenId, scope: value.scope };
 }
 
 export function parseCardAction(event) {

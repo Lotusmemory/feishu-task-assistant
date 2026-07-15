@@ -36,7 +36,32 @@ export function createTaskService({ base, members, confirmations, clock = Date.n
     return { kind: 'confirmation', confirmationId, preview: { operation: action.operation, before, after } };
   }
 
+  function taskListResult(tasks) {
+    const visibleTasks = tasks.filter((task) => task.status !== '已完成');
+    return {
+      kind: visibleTasks.length ? 'task_list' : 'result',
+      tasks: visibleTasks,
+      text: visibleTasks.length ? visibleTasks.map(formatTask).join('\n') : '没有找到匹配的任务。',
+    };
+  }
+
+  async function queryScope(scope, actorOpenId, name) {
+    if (scope === 'all') {
+      const leader = typeof members.isLeader === 'function' && await members.isLeader(actorOpenId);
+      if (!leader) return { kind: 'result', text: '仅 Leader 可以查看全部成员任务。' };
+    }
+    const searchSelector = {};
+    if (name) searchSelector.name = name;
+    if (scope !== 'all') searchSelector.ownerOpenId = actorOpenId;
+    return taskListResult(await base.searchTasks(searchSelector));
+  }
+
   return {
+    async queryScope(scope, actorOpenId) {
+      if (!['self', 'all'].includes(scope)) return { kind: 'result', text: '不支持的任务盘点范围。' };
+      return queryScope(scope, actorOpenId);
+    },
+
     async prepare(intent, actorOpenId) {
       const { operation, selector = {}, fields = {} } = intent;
 
@@ -67,19 +92,20 @@ export function createTaskService({ base, members, confirmations, clock = Date.n
         );
       }
 
+      if (operation === 'query_tasks') {
+        if (selector.ownerOpenId !== 'me') {
+          const leader = typeof members.isLeader === 'function' && await members.isLeader(actorOpenId);
+          if (leader) return { kind: 'task_scope_choice', text: '请选择任务盘点范围。' };
+        }
+        return queryScope('self', actorOpenId, selector.name);
+      }
+
       const searchSelector = {};
       if (selector.name) searchSelector.name = selector.name;
       if (selector.ownerOpenId) searchSelector.ownerOpenId = selector.ownerOpenId === 'me' ? actorOpenId : selector.ownerOpenId;
       let tasks = await base.searchTasks(searchSelector);
       if (selector.recordId) tasks = tasks.filter((item) => item.recordId === selector.recordId);
 
-      if (operation === 'query_tasks') {
-        return {
-          kind: tasks.length ? 'task_list' : 'result',
-          tasks,
-          text: tasks.length ? tasks.map(formatTask).join('\n') : '没有找到匹配的任务。',
-        };
-      }
       if (operation === 'edit_task_form') {
         if (selector.ownerOpenId && !selector.name && !selector.recordId) {
           const editableTasks = tasks.filter((task) => EDITABLE_TASK_STATUSES.has(task.status));

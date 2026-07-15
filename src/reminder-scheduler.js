@@ -3,13 +3,16 @@ import {
   buildConsentCard,
   buildLeaderSummaryCards,
   buildOwnerReminderCards,
+  buildReminderReasonCard,
+  buildTaskConfirmationResultCard,
   parseCardAction,
+  parseReminderReasonAction,
 } from './feishu-messenger.js';
 
 const OWNER_ACTIONS = new Set(['complete', 'continue', 'block', 'postpone']);
 const ACTION_INTENTS = {
   complete: { operation: 'complete_task', fields: {} },
-  continue: { operation: 'update_task', fields: { 状态: '进行中' } },
+  continue: null,
   block: { operation: 'block_task', fields: {} },
   postpone: { operation: 'postpone_task', fields: {} },
 };
@@ -202,6 +205,23 @@ export function createReminderScheduler({
   }
 
   async function handleCardAction(event) {
+    const reasonAction = parseReminderReasonAction(event);
+    if (reasonAction) {
+      const task = await base?.getTask(reasonAction.taskId);
+      if (!task || task.ownerOpenId !== reasonAction.actorOpenId) return { kind: 'ignored', reason: 'forbidden' };
+      const status = reasonAction.action === 'block' ? '阻塞中' : '已延期';
+      const prepared = await taskService.prepare({
+        operation: 'update_task', selector: { recordId: reasonAction.taskId },
+        fields: { 状态: status, 阻塞原因: reasonAction.reason },
+      }, reasonAction.actorOpenId);
+      if (prepared?.kind !== 'confirmation') throw new Error('Task reason action did not produce a confirmation');
+      const result = await taskService.confirm(prepared.confirmationId, reasonAction.actorOpenId);
+      if (typeof event?.token === 'string' && event.token) {
+        await messenger.updateCardByToken(event.token, buildTaskConfirmationResultCard('操作成功。'));
+      }
+      return result;
+    }
+
     const parsed = parseCardAction(event);
     if (!parsed) return { kind: 'ignored', reason: 'invalid' };
 
@@ -218,25 +238,27 @@ export function createReminderScheduler({
     if (!await claim(key)) return { kind: 'ignored', reason: 'duplicate' };
 
     try {
+      if (parsed.action === 'continue') {
+        await finish(key, true);
+        return { kind: 'result', text: '已继续处理，任务状态未修改。' };
+      }
+
+      if (parsed.action === 'block' || parsed.action === 'postpone') {
+        await messenger.sendCard(
+          parsed.actorOpenId,
+          buildReminderReasonCard(task, parsed.action),
+          `callback-reason:${messageId}:${parsed.action}:${parsed.taskId}:${parsed.actorOpenId}`,
+        );
+        await finish(key, true);
+        return { kind: 'result', text: '请填写原因。' };
+      }
+
       const actionIntent = ACTION_INTENTS[parsed.action];
       const result = await taskService.prepare({
         operation: actionIntent.operation,
         selector: { recordId: parsed.taskId },
         fields: { ...actionIntent.fields },
       }, parsed.actorOpenId);
-
-      if (parsed.action === 'block' || parsed.action === 'postpone') {
-        const text = parsed.action === 'block'
-          ? `请继续发送：阻塞任务 ${parsed.taskId}，阻塞原因：等待接口。`
-          : `请继续发送：延期任务 ${parsed.taskId}，新截止日期：2026-07-20。`;
-        await messenger.sendText(
-          parsed.actorOpenId,
-          text,
-          `callback-help:${messageId}:${parsed.action}:${parsed.taskId}:${parsed.actorOpenId}`,
-        );
-        await finish(key, true);
-        return { kind: 'result', text };
-      }
 
       if (result?.kind !== 'confirmation' || typeof result.confirmationId !== 'string') {
         throw new Error('Task action did not produce a confirmation');
@@ -248,6 +270,11 @@ export function createReminderScheduler({
       }
       const confirmed = await taskService.confirm(result.confirmationId, parsed.actorOpenId);
       await finish(key, true);
+      if (typeof event?.token === 'string' && event.token && typeof messenger.updateCardByToken === 'function') {
+        await messenger.updateCardByToken(event.token, buildTaskConfirmationResultCard(confirmed.text));
+      } else if (typeof messageId === 'string' && typeof messenger.updateCard === 'function') {
+        await messenger.updateCard(messageId, buildTaskConfirmationResultCard(confirmed.text));
+      }
       return confirmed;
     } catch (error) {
       await finish(key, false);

@@ -39,6 +39,15 @@ test('completes with exactly the supplied system and user messages', async () =>
   ]);
 });
 
+test('strips model thinking blocks from answers', async () => {
+  const client = createMiniMaxClient({ ...options, fetchImpl: async () => ({
+    ok: true,
+    json: async () => ({ choices: [{ message: { content: '<think>内部推理</think>\n最终回答' } }] }),
+  }) });
+
+  assert.equal(await client.answer('你好'), '最终回答');
+});
+
 test('normalizes controlled completion failures', async () => {
   const client = createMiniMaxClient({ ...options, fetchImpl: async () => ({ ok: false, status: 503 }) });
   await assert.rejects(() => client.completeWithSystem('系统', '输入'), /MiniMax request failed/);

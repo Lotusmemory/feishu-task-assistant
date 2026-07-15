@@ -15,6 +15,8 @@ test('matches leaders by owner open id and caches members in process', async () 
 
   assert.deepEqual(await members.leadersByOwner('ou_owner'), ['ou_leader_1', 'ou_leader_2']);
   assert.deepEqual(await members.leadersByOwner('ou_missing'), []);
+  assert.equal(await members.isLeader('ou_leader_1'), true);
+  assert.equal(await members.isLeader('ou_missing'), false);
   assert.equal(calls, 1);
   assert.equal((await members.resolveByName('张三')).length, 2);
 });

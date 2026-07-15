@@ -7,7 +7,7 @@ import { createBaseClient } from './base-client.js';
 import { createEmbedder } from './embedder.js';
 import { createKnowledgeSync } from './knowledge-sync.js';
 import { createMiniMaxClient } from './minimax-client.js';
-import { createMessageHandler } from './message-handler.js';
+import { createMessageHandler, createTaskConfirmationActionHandler } from './message-handler.js';
 import { createRagService } from './rag-service.js';
 import { createUnknownQuestionService } from './unknown-question.js';
 import { createVectorIndex, loadIndex } from './vector-index.js';
@@ -23,10 +23,14 @@ import { createTokenVault } from './token-vault.js';
 import { createOAuthServer, createSafeOAuthCodeExchanger } from './oauth-server.js';
 import { createChatHistory, UserAuthorizationRequired } from './chat-history.js';
 import { createChatSummary } from './chat-summary.js';
+import { createChatSummaryRequest } from './chat-summary-request.js';
+import { createLarkCliChatHistory } from './lark-cli-chat-history.js';
 import { shanghaiDayWindow } from './date-window.js';
+import { createCardActionDispatcher } from './card-action-dispatcher.js';
 
 const NOOP_LOGGER = Object.freeze({ error() {}, warn() {}, info() {}, debug() {}, trace() {} });
 const CONFIRMATION_TTL_MS = 24 * 60 * 60 * 1_000;
+const CHAT_SUMMARY_TIMEOUT_MS = 120_000;
 
 function chatWindow(at = new Date()) {
   const { dateKey } = shanghaiDayWindow(at);
@@ -36,14 +40,22 @@ function chatWindow(at = new Date()) {
 export async function createApplication({ config = loadConfig(), sdk = lark, logger = console } = {}) {
   const baseConfig = { appId: config.feishuAppId, appSecret: config.feishuAppSecret, domain: sdk.Domain.Feishu };
   const client = new sdk.Client({ ...baseConfig, appType: sdk.AppType.SelfBuild });
-  const safeUserClient = config.enableChatSummary ? new sdk.Client({
+  const useOauthChatSummary = config.enableChatSummary && config.chatHistoryProvider !== 'lark-cli';
+  const safeUserClient = useOauthChatSummary ? new sdk.Client({
     ...baseConfig, appType: sdk.AppType.SelfBuild,
     logger: NOOP_LOGGER, loggerLevel: sdk.LoggerLevel.fatal,
   }) : null;
   const minimax = createMiniMaxClient({ apiKey: config.minimaxApiKey, baseUrl: config.minimaxBaseUrl, model: config.minimaxModel });
+  const chatSummaryMinimax = createMiniMaxClient({
+    apiKey: config.minimaxApiKey,
+    baseUrl: config.minimaxBaseUrl,
+    model: config.minimaxModel,
+    timeoutMs: CHAT_SUMMARY_TIMEOUT_MS,
+  });
   const embedder = createEmbedder({ apiKey: config.embeddingApiKey, baseUrl: config.embeddingBaseUrl, model: config.embeddingModel });
   const base = createBaseClient({
-    client, baseToken: config.baseToken, knowledgeTableId: config.knowledgeTableId,
+    client, knowledgeBaseToken: config.knowledgeBaseToken, taskBaseToken: config.taskBaseToken,
+    knowledgeTableId: config.knowledgeTableId,
     questionsTableId: config.questionsTableId, tasksTableId: config.tasksTableId,
     membersTableId: config.membersTableId,
   });
@@ -57,20 +69,30 @@ export async function createApplication({ config = loadConfig(), sdk = lark, log
   const taskIntent = createTaskIntentParser({ minimax });
   const messenger = createFeishuMessenger({ client });
   const reminderService = createReminderService({ base, members });
-  const tokenStore = config.enableChatSummary
+  const tokenStore = useOauthChatSummary
     ? createJsonStore({ path: config.tokenPath, defaultValue: { users: {} } })
     : null;
-  const vault = config.enableChatSummary
+  const vault = useOauthChatSummary
     ? createTokenVault({ store: tokenStore, encryptionKey: config.tokenEncryptionKey })
     : null;
-  const oauth = config.enableChatSummary ? createOAuthServer({
+  const oauth = useOauthChatSummary ? createOAuthServer({
     codeExchanger: createSafeOAuthCodeExchanger({
       appId: config.feishuAppId, appSecret: config.feishuAppSecret, domain: sdk.Domain.Feishu,
     }),
     vault, redirectUri: config.oauthRedirectUri, port: config.port, stateStore,
   }) : null;
-  const chatHistory = config.enableChatSummary ? createChatHistory({ client: safeUserClient, vault }) : null;
-  const chatSummary = config.enableChatSummary ? createChatSummary({ minimax, taskService }) : null;
+  const chatHistory = config.enableChatSummary
+    ? config.chatHistoryProvider === 'lark-cli'
+      ? createLarkCliChatHistory({ command: config.larkCliPath })
+      : createChatHistory({ client: safeUserClient, vault })
+    : null;
+  const chatSummary = config.enableChatSummary ? createChatSummary({ minimax: chatSummaryMinimax, taskService }) : null;
+  const chatSummaryRequest = config.enableChatSummary
+    ? createChatSummaryRequest({
+      history: chatHistory, summary: chatSummary, oauth,
+      allowedOpenId: config.allowedChatSummaryOpenId,
+    })
+    : null;
 
   let currentIndex = createVectorIndex([], { threshold: config.embeddingThreshold });
   try {
@@ -117,13 +139,20 @@ export async function createApplication({ config = loadConfig(), sdk = lark, log
     logger,
   });
   const handler = createMessageHandler({
-    taskIntent, taskService, assistant,
+    taskIntent, taskService, chatSummaryRequest, assistant,
     reply: (messageId, text) => messenger.replyText(messageId, text),
-    deduplicator: createDeduplicator(), logger,
+    replyCard: (messageId, card) => messenger.replyCard(messageId, card),
+    messenger, deduplicator: createDeduplicator(), logger,
+  });
+  const confirmationAction = createTaskConfirmationActionHandler({ taskService, messenger, logger });
+  const cardAction = createCardActionDispatcher({
+    confirmationAction,
+    reminderAction: (event) => scheduler.handleCardAction(event),
+    logger,
   });
   const eventDispatcher = new sdk.EventDispatcher({}).register({
     'im.message.receive_v1': handler,
-    'card.action.trigger': (event) => scheduler.handleCardAction(event),
+    'card.action.trigger': cardAction,
   });
   const wsClient = new sdk.WSClient({ ...baseConfig, loggerLevel: sdk.LoggerLevel.info });
   let syncTimer;

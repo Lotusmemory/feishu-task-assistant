@@ -7,8 +7,11 @@ function formatTask(task) {
   return `${task.name}（负责人：${task.ownerName || '未指定'}，状态：${task.status || '未设置'}${deadline}）`;
 }
 
+const EDITABLE_TASK_STATUSES = new Set(['未开始', '进行中', '阻塞中', '已延期']);
+
 async function resolveOwner(fields, members) {
   if (!('负责人' in fields) || typeof fields['负责人'] !== 'string') return fields;
+  if (/^ou_[a-zA-Z0-9]+$/.test(fields['负责人'])) return fields;
   const matches = await members.resolveByName(fields['负责人']);
   if (matches.length === 1) return { ...fields, 负责人: matches[0].openId };
   if (matches.length > 1) return null;
@@ -18,19 +21,69 @@ async function resolveOwner(fields, members) {
   return { ...fields, 负责人: openIdMatches[0].openId };
 }
 
+function shanghaiDefaultDeadline(now) {
+  const dateKey = new Date(now + 8 * 60 * 60 * 1_000).toISOString().slice(0, 10);
+  return Date.parse(`${dateKey}T18:30:00+08:00`);
+}
+
+function defaultPriority(activeTaskCount) {
+  return ['P0', 'P1', 'P2', 'P3'][Math.min(activeTaskCount, 3)];
+}
+
 export function createTaskService({ base, members, confirmations, clock = Date.now }) {
   async function prepareConfirmation(actorOpenId, action, before, after) {
     const confirmationId = await confirmations.create(actorOpenId, action);
     return { kind: 'confirmation', confirmationId, preview: { operation: action.operation, before, after } };
   }
 
+  function taskListResult(tasks) {
+    const visibleTasks = tasks.filter((task) => task.status !== '已完成');
+    return {
+      kind: visibleTasks.length ? 'task_list' : 'result',
+      tasks: visibleTasks,
+      text: visibleTasks.length ? visibleTasks.map(formatTask).join('\n') : '没有找到匹配的任务。',
+    };
+  }
+
+  async function queryScope(scope, actorOpenId, name) {
+    if (scope === 'all') {
+      const leader = typeof members.isLeader === 'function' && await members.isLeader(actorOpenId);
+      if (!leader) return { kind: 'result', text: '仅 Leader 可以查看全部成员任务。' };
+    }
+    const searchSelector = {};
+    if (name) searchSelector.name = name;
+    if (scope !== 'all') searchSelector.ownerOpenId = actorOpenId;
+    return taskListResult(await base.searchTasks(searchSelector));
+  }
+
   return {
+    async queryScope(scope, actorOpenId) {
+      if (!['self', 'all'].includes(scope)) return { kind: 'result', text: '不支持的任务盘点范围。' };
+      return queryScope(scope, actorOpenId);
+    },
+
     async prepare(intent, actorOpenId) {
       const { operation, selector = {}, fields = {} } = intent;
 
       if (operation === 'create_task') {
-        const resolvedFields = await resolveOwner(fields, members);
+        if (typeof fields['任务名'] !== 'string' || !fields['任务名'].trim()) {
+          return { kind: 'need_input', field: '任务名', text: '请提供任务名。' };
+        }
+        const now = clock();
+        const createFields = {
+          状态: '未开始',
+          开始日期: now,
+          截止日期: shanghaiDefaultDeadline(now),
+          ...fields,
+          负责人: '负责人' in fields ? fields['负责人'] : actorOpenId,
+        };
+        let resolvedFields = await resolveOwner(createFields, members);
         if (!resolvedFields) return { kind: 'result', text: '无法唯一确定负责人。' };
+        if (!('优先级' in resolvedFields)) {
+          const ownerTasks = await base.searchTasks({ ownerOpenId: resolvedFields['负责人'] });
+          const activeTaskCount = ownerTasks.filter((task) => task.status === '进行中').length;
+          resolvedFields = { ...resolvedFields, 优先级: defaultPriority(activeTaskCount) };
+        }
         return prepareConfirmation(
           actorOpenId,
           { operation, fields: resolvedFields },
@@ -39,17 +92,32 @@ export function createTaskService({ base, members, confirmations, clock = Date.n
         );
       }
 
+      if (operation === 'query_tasks') {
+        if (selector.ownerOpenId !== 'me') {
+          const leader = typeof members.isLeader === 'function' && await members.isLeader(actorOpenId);
+          if (leader) return { kind: 'task_scope_choice', text: '请选择任务盘点范围。' };
+        }
+        return queryScope('self', actorOpenId, selector.name);
+      }
+
       const searchSelector = {};
       if (selector.name) searchSelector.name = selector.name;
-      if (selector.ownerOpenId) searchSelector.ownerOpenId = selector.ownerOpenId;
+      if (selector.ownerOpenId) searchSelector.ownerOpenId = selector.ownerOpenId === 'me' ? actorOpenId : selector.ownerOpenId;
       let tasks = await base.searchTasks(searchSelector);
       if (selector.recordId) tasks = tasks.filter((item) => item.recordId === selector.recordId);
 
-      if (operation === 'query_tasks') {
-        return {
-          kind: 'result',
-          text: tasks.length ? tasks.map(formatTask).join('\n') : '没有找到匹配的任务。',
-        };
+      if (operation === 'edit_task_form') {
+        if (selector.ownerOpenId && !selector.name && !selector.recordId) {
+          const editableTasks = tasks.filter((task) => EDITABLE_TASK_STATUSES.has(task.status));
+          return {
+            kind: editableTasks.length ? 'edit_task_picker' : 'result',
+            tasks: editableTasks,
+            text: editableTasks.length ? editableTasks.map(formatTask).join('\n') : '没有找到可修改的任务。',
+          };
+        }
+        if (tasks.length === 0) return { kind: 'result', text: '没有找到匹配的任务。' };
+        if (tasks.length > 1) return { kind: 'disambiguation', candidates: candidates(tasks) };
+        return { kind: 'edit_form', task: tasks[0] };
       }
       if (tasks.length === 0) return { kind: 'result', text: '没有找到匹配的任务。' };
       if (tasks.length > 1) return { kind: 'disambiguation', candidates: candidates(tasks) };

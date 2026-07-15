@@ -29,7 +29,8 @@ cp .env.example .env
 同时填写 Base 与 Embedding 配置：
 
 ```dotenv
-FEISHU_BASE_TOKEN=你的BaseToken
+FEISHU_KNOWLEDGE_BASE_TOKEN=知识库BaseToken
+FEISHU_TASK_BASE_TOKEN=任务看板BaseToken
 FEISHU_KNOWLEDGE_TABLE_ID=知识库表ID
 FEISHU_QUESTIONS_TABLE_ID=待补问题表ID
 SILICONFLOW_API_KEY=你的SiliconFlow密钥
@@ -53,6 +54,16 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 
 如果先关闭聊天总结，设置 `ENABLE_CHAT_SUMMARY=false`。此时不需要填写 `TOKEN_ENCRYPTION_KEY` 和 `OAUTH_REDIRECT_URI`，程序也不会启动公网 HTTP/OAuth 服务或发送聊天授权卡；任务管理、18:00 提醒和 Leader 汇总仍正常运行。
 
+单人本机试点可以不走 OAuth，改用本机 `lark-cli` 用户登录态读取聊天。此模式只允许一个机器人侧 `open_id` 触发，避免其他人总结本机用户的聊天：
+
+```dotenv
+ENABLE_CHAT_SUMMARY=true
+CHAT_HISTORY_PROVIDER=lark-cli
+ALLOWED_CHAT_SUMMARY_OPEN_ID=允许使用者的open_id
+```
+
+试点模式需要本机 `lark-cli whoami` 显示 `identity` 为 `user` 且 `available` 为 `true`。用户可私聊机器人发送“总结今天的聊天”，或继续使用明确日期范围：“总结 2026-07-01 到 2026-07-15 的聊天”。
+
 服务必须持续运行，18:00 调度才会执行。开发或人工验收可在测试中注入固定时钟，或调用组装后暴露的 `application.scheduler.runNow(date)`，无需等待真实 18:00。
 
 ## 验收
@@ -66,11 +77,12 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 7. `runNow()` 后负责人收到可操作卡片，leader 只收到无按钮汇总；同日重跑不重复发送。
 8. 聊天摘要卡片选择拒绝或未授权时不读取消息；同意且完成 OAuth 后，摘要和草稿只私聊本人。
 9. 摘要草稿默认负责人是本人，确认草稿后才写入任务表。
+10. 私聊机器人发送“总结 2026-07-01 到 2026-07-15 的聊天”，应读取该上海时区闭区间内可访问的文本消息并返回摘要；未授权时先返回 OAuth 链接，授权后重新发送原请求。
 
 ## 隐私与令牌运维
 
 - 未明确同意时不调用聊天搜索 API。
-- 只读取当天可访问的文本消息；图片、文件、音视频和卡片资源不解析。
+- 只在用户点击当日授权卡，或主动发送带明确起止日期的总结请求后，读取相应范围内可访问的文本消息；图片、文件、音视频和卡片资源不解析。
 - 原始聊天正文不写 JSON store、Base 或普通日志；leader 不接收聊天正文或摘要。
 - 用户 token 使用 AES-256-GCM 加密后写入 `.data/user-tokens.json`。
 - 用户撤销授权后，应停止相应摘要流程；需要本地清除全部缓存令牌时，先停服务，再删除 `.data/user-tokens.json`，重启后用户需重新授权。

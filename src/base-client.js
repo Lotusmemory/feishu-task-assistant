@@ -7,19 +7,28 @@ const WRITABLE_TASK_FIELDS = new Set([
   '任务名', '负责人', '协作人', '状态', '进度', '开始日期', '截止日期', '完成时间', '阻塞原因', '优先级', '标签',
 ]);
 
+function textValue(value) {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map((item) => typeof item === 'string' ? item : item?.text || '').join('');
+  return '';
+}
+
 function mapTask({ record_id: recordId, fields }) {
   const owner = fields['负责人']?.[0];
-  return {
+  const task = {
     recordId,
-    name: fields['任务名'] || '',
+    name: textValue(fields['任务名']),
     ownerOpenId: owner?.id || '',
     ownerName: owner?.name || '',
     status: fields['状态'] || '',
     progress: Number(fields['进度'] || 0),
     deadline: fields['截止日期'],
     priority: fields['优先级'] || '',
-    blocker: fields['阻塞原因'] || '',
+    blocker: textValue(fields['阻塞原因']),
   };
+  if (fields['开始日期'] !== undefined) task.start = fields['开始日期'];
+  if (Array.isArray(fields['标签'])) task.tags = fields['标签'];
+  return task;
 }
 
 function writableTaskFields(fields) {
@@ -38,16 +47,16 @@ function writableTaskFields(fields) {
 }
 
 export function createBaseClient({
-  client, baseToken, knowledgeTableId, questionsTableId, tasksTableId, membersTableId,
+  client, baseToken, knowledgeBaseToken = baseToken, taskBaseToken = baseToken,
+  knowledgeTableId, questionsTableId, tasksTableId, membersTableId,
 }) {
-  async function searchTaskRecords(filter, operation) {
+  async function listTaskRecords(operation) {
     const records = [];
     let pageToken;
     do {
-      const response = await client.bitable.v1.appTableRecord.search({
-        path: { app_token: baseToken, table_id: tasksTableId },
+      const response = await client.bitable.v1.appTableRecord.list({
+        path: { app_token: taskBaseToken, table_id: tasksTableId },
         params: { page_size: 500, page_token: pageToken },
-        data: { filter },
       });
       const data = assertSuccess(response, operation);
       records.push(...(data.items || []));
@@ -62,7 +71,7 @@ export function createBaseClient({
       let pageToken;
       do {
         const response = await client.bitable.v1.appTableRecord.list({
-          path: { app_token: baseToken, table_id: knowledgeTableId },
+          path: { app_token: knowledgeBaseToken, table_id: knowledgeTableId },
           params: { page_size: 500, page_token: pageToken, filter: 'CurrentValue.[状态] = "已发布"' },
         });
         const data = assertSuccess(response, 'List knowledge');
@@ -96,7 +105,7 @@ export function createBaseClient({
       };
       if (callbackUser) fields['回访用户'] = callbackUser;
       const response = await client.bitable.v1.appTableRecord.create({
-        path: { app_token: baseToken, table_id: questionsTableId },
+        path: { app_token: knowledgeBaseToken, table_id: questionsTableId },
         data: { fields },
       });
       return assertSuccess(response, 'Create unknown question').record;
@@ -104,7 +113,7 @@ export function createBaseClient({
 
     async findQuestion(normalized) {
       const response = await client.bitable.v1.appTableRecord.search({
-        path: { app_token: baseToken, table_id: questionsTableId },
+        path: { app_token: knowledgeBaseToken, table_id: questionsTableId },
         params: { page_size: 1 },
         data: { filter: { conjunction: 'and', conditions: [
           { field_name: '归一化问题', operator: 'is', value: [normalized] },
@@ -121,38 +130,33 @@ export function createBaseClient({
         fields['回访用户'] = callbackUser;
       }
       const response = await client.bitable.v1.appTableRecord.update({
-        path: { app_token: baseToken, table_id: questionsTableId, record_id: recordId },
+        path: { app_token: knowledgeBaseToken, table_id: questionsTableId, record_id: recordId },
         data: { fields },
       });
       return assertSuccess(response, 'Increment unknown question').record;
     },
 
     async listDueTasks({ startMs, endMs }) {
-      return searchTaskRecords({ conjunction: 'and', conditions: [
-        { field_name: '截止日期', operator: 'isGreaterEqual', value: [String(startMs)] },
-        { field_name: '截止日期', operator: 'isLessEqual', value: [String(endMs)] },
-        { field_name: '负责人', operator: 'isNotEmpty', value: [] },
-        { field_name: '状态', operator: 'isNot', value: ['已完成'] },
-      ] }, 'List due tasks');
+      return (await listTaskRecords('List due tasks')).filter((task) => task.ownerOpenId
+        && Number(task.deadline) >= startMs && Number(task.deadline) <= endMs
+        && task.status !== '已完成');
     },
 
     async searchTasks({ name, ownerOpenId }) {
-      const conditions = [];
-      if (name) conditions.push({ field_name: '任务名', operator: 'contains', value: [name] });
-      if (ownerOpenId) conditions.push({ field_name: '负责人', operator: 'is', value: [ownerOpenId] });
-      return searchTaskRecords({ conjunction: 'and', conditions }, 'Search tasks');
+      return (await listTaskRecords('Search tasks')).filter((task) => (!name || task.name.includes(name))
+        && (!ownerOpenId || task.ownerOpenId === ownerOpenId));
     },
 
     async getTask(recordId) {
       const response = await client.bitable.v1.appTableRecord.get({
-        path: { app_token: baseToken, table_id: tasksTableId, record_id: recordId },
+        path: { app_token: taskBaseToken, table_id: tasksTableId, record_id: recordId },
       });
       return mapTask(assertSuccess(response, 'Get task').record);
     },
 
     async createTask(fields) {
       const response = await client.bitable.v1.appTableRecord.create({
-        path: { app_token: baseToken, table_id: tasksTableId },
+        path: { app_token: taskBaseToken, table_id: tasksTableId },
         data: { fields: writableTaskFields(fields) },
       });
       return assertSuccess(response, 'Create task').record;
@@ -160,7 +164,7 @@ export function createBaseClient({
 
     async updateTask(recordId, fields) {
       const response = await client.bitable.v1.appTableRecord.update({
-        path: { app_token: baseToken, table_id: tasksTableId, record_id: recordId },
+        path: { app_token: taskBaseToken, table_id: tasksTableId, record_id: recordId },
         data: { fields: writableTaskFields(fields) },
       });
       return assertSuccess(response, 'Update task').record;
@@ -169,7 +173,7 @@ export function createBaseClient({
     async deleteTask(recordId) {
       if (typeof recordId !== 'string' || !recordId.trim()) throw new Error('recordId must be non-empty');
       const response = await client.bitable.v1.appTableRecord.delete({
-        path: { app_token: baseToken, table_id: tasksTableId, record_id: recordId },
+        path: { app_token: taskBaseToken, table_id: tasksTableId, record_id: recordId },
       });
       return assertSuccess(response, 'Delete task');
     },
@@ -179,7 +183,7 @@ export function createBaseClient({
       let pageToken;
       do {
         const response = await client.bitable.v1.appTableRecord.list({
-          path: { app_token: baseToken, table_id: membersTableId },
+          path: { app_token: taskBaseToken, table_id: membersTableId },
           params: { page_size: 500, page_token: pageToken },
         });
         const data = assertSuccess(response, 'List members');

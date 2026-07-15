@@ -1,5 +1,8 @@
 const SYSTEM_PROMPT = `你是聊天任务摘要器，只返回 JSON，不要返回 Markdown。只能根据输入消息总结，不得推断未出现的事实。讨论、建议和假设应归入 risks，不得当作已确认任务。顶级字段只能是 summary 和 taskDrafts。summary 只能包含 important、decisions、todos、risks、people 五个字符串数组。taskDrafts 每项只能包含任务名、截止日期、优先级、来源摘要。`;
 const SUMMARY_KEYS = ['important', 'decisions', 'todos', 'risks', 'people'];
+const SUMMARY_LABELS = {
+  important: '重点信息', decisions: '已确认决策', todos: '待办事项', risks: '风险与待确认项', people: '相关人员',
+};
 const MAX_CHARS = 24_000;
 
 function parseJson(value) {
@@ -21,6 +24,17 @@ function cleanSummary(value) {
   return summary;
 }
 
+function hasSummaryContent(summary) {
+  return SUMMARY_KEYS.some((key) => summary[key].length > 0);
+}
+
+function formatSummary(summary) {
+  return SUMMARY_KEYS.flatMap((key) => {
+    if (summary[key].length === 0) return [];
+    return [`**${SUMMARY_LABELS[key]}**\n${summary[key].map((item) => `- ${item}`).join('\n')}`];
+  }).join('\n\n');
+}
+
 function cleanDrafts(value) {
   if (!Array.isArray(value)) return [];
   return value.flatMap((draft) => {
@@ -36,7 +50,9 @@ function chunks(messages) {
   const result = [];
   let current = '';
   for (const message of messages) {
-    const line = `${message.createTime || ''}\t${message.senderId || ''}\t${message.text || ''}\n`;
+    const senderName = message.senderName
+      || (/^cli_/.test(message.senderId || '') ? '智能客服' : '未知成员');
+    const line = `${message.createTime || ''}\t${senderName}\t${message.text || ''}\n`;
     if (current && current.length + line.length > MAX_CHARS) {
       result.push(current);
       current = '';
@@ -54,16 +70,31 @@ export function createChatSummary({ minimax, taskService }) {
 
   return {
     async summarize(messages, actorOpenId) {
+      if (messages.length === 0) {
+        const summary = cleanSummary();
+        return { summary, summaryText: '当天没有可总结的文本消息。', drafts: [] };
+      }
       const inputs = chunks(messages);
       let candidate;
-      if (inputs.length <= 1) candidate = await complete(inputs[0] || '当天没有可总结的文本消息。');
+      let retryPrompt;
+      if (inputs.length <= 1) {
+        candidate = await complete(inputs[0]);
+        retryPrompt = `上次摘要错误地返回了空内容。请重新总结以下非空聊天；有实质信息时，至少填写一个 summary 数组。\n${inputs[0]}`;
+      }
       else {
         const partials = [];
         for (const input of inputs) partials.push(await complete(input));
-        candidate = await complete(`合并以下分块摘要，去重并保持固定 JSON 结构：\n${JSON.stringify(partials)}`);
+        const mergePrompt = `合并以下分块摘要，去重并保持固定 JSON 结构：\n${JSON.stringify(partials)}`;
+        candidate = await complete(mergePrompt);
+        retryPrompt = `上次合并错误地返回了空内容。请重新合并，并至少填写一个非空 summary 数组：\n${JSON.stringify(partials)}`;
       }
 
-      const summary = cleanSummary(candidate.summary);
+      let summary = cleanSummary(candidate.summary);
+      if (!hasSummaryContent(summary)) {
+        candidate = await complete(retryPrompt);
+        summary = cleanSummary(candidate.summary);
+      }
+      if (!hasSummaryContent(summary)) throw new Error('Chat summary returned no content');
       const drafts = [];
       for (const draft of cleanDrafts(candidate.taskDrafts)) {
         const fields = { ...draft.fields, 负责人: actorOpenId };
@@ -72,7 +103,7 @@ export function createChatSummary({ minimax, taskService }) {
           drafts.push({ draftId: prepared.confirmationId, fields, sourceSummary: draft.sourceSummary });
         }
       }
-      return { summaryText: JSON.stringify(summary), drafts };
+      return { summary, summaryText: formatSummary(summary), drafts };
     },
   };
 }

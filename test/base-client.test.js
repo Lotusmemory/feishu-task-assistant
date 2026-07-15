@@ -40,7 +40,7 @@ test('lists due tasks across pages and maps only required fields', async () => {
     }}] } },
     { code: 0, data: { has_more: false, items: [] } },
   ];
-  const client = { bitable: { v1: { appTableRecord: { search: async (payload) => {
+  const client = { bitable: { v1: { appTableRecord: { list: async (payload) => {
     calls.push(payload);
     return responses.shift();
   } } } } };
@@ -49,13 +49,7 @@ test('lists due tasks across pages and maps only required fields', async () => {
   const due = await base.listDueTasks({ startMs: 1783958400000, endMs: 1784044799999 });
 
   assert.equal(calls[0].path.table_id, 'tbl_tasks');
-  assert.equal(calls[0].data.filter.conjunction, 'and');
-  assert.deepEqual(calls[0].data.filter.conditions, [
-    { field_name: '截止日期', operator: 'isGreaterEqual', value: ['1783958400000'] },
-    { field_name: '截止日期', operator: 'isLessEqual', value: ['1784044799999'] },
-    { field_name: '负责人', operator: 'isNotEmpty', value: [] },
-    { field_name: '状态', operator: 'isNot', value: ['已完成'] },
-  ]);
+  assert.equal(calls[0].params.page_size, 500);
   assert.equal(calls[1].params.page_token, 'next');
   assert.deepEqual(due[0], {
     recordId: 'rec1', name: '首页设计', ownerOpenId: 'ou_owner', ownerName: '张三',
@@ -65,17 +59,14 @@ test('lists due tasks across pages and maps only required fields', async () => {
 
 test('searches tasks by name and owner open id', async () => {
   let payload;
-  const client = { bitable: { v1: { appTableRecord: { search: async (value) => {
+  const client = { bitable: { v1: { appTableRecord: { list: async (value) => {
     payload = value;
     return { code: 0, data: { has_more: false, items: [] } };
   } } } } };
   const base = createBaseClient({ client, baseToken: 'bas', tasksTableId: 'tbl_tasks' });
 
   assert.deepEqual(await base.searchTasks({ name: '首页', ownerOpenId: 'ou_owner' }), []);
-  assert.deepEqual(payload.data.filter.conditions, [
-    { field_name: '任务名', operator: 'contains', value: ['首页'] },
-    { field_name: '负责人', operator: 'is', value: ['ou_owner'] },
-  ]);
+  assert.equal(payload.params.page_size, 500);
 });
 
 test('gets the current task by record id for callback ownership checks', async () => {
@@ -94,6 +85,18 @@ test('gets the current task by record id for callback ownership checks', async (
     status: '进行中', progress: 60, deadline: 1784041200000, priority: 'P1', blocker: '',
   });
   assert.deepEqual(payload.path, { app_token: 'bas', table_id: 'tbl_tasks', record_id: 'rec1' });
+});
+
+test('normalizes rich-text task fields returned by Base', async () => {
+  const client = { bitable: { v1: { appTableRecord: {
+    async get() { return { code: 0, data: { record: { record_id: 'rec1', fields: {
+      任务名: [{ text: '喝水', type: 'text' }], 阻塞原因: [{ text: '等待', type: 'text' }],
+    } } } }; },
+  } } } };
+  const base = createBaseClient({ client, baseToken: 'bas', tasksTableId: 'tbl_tasks' });
+  const task = await base.getTask('rec1');
+  assert.equal(task.name, '喝水');
+  assert.equal(task.blocker, '等待');
 });
 
 test('creates, updates, and deletes tasks through the tasks table', async () => {

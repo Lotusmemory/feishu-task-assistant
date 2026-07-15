@@ -1,16 +1,25 @@
 const REQUIRED = [
   'FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'MINIMAX_API_KEY',
-  'FEISHU_BASE_TOKEN', 'FEISHU_KNOWLEDGE_TABLE_ID', 'FEISHU_QUESTIONS_TABLE_ID',
+  'FEISHU_KNOWLEDGE_TABLE_ID', 'FEISHU_QUESTIONS_TABLE_ID',
   'SILICONFLOW_API_KEY',
   'FEISHU_TASKS_TABLE_ID', 'FEISHU_MEMBERS_TABLE_ID',
 ];
 
 export function loadConfig(env = process.env) {
   const enableChatSummary = env.ENABLE_CHAT_SUMMARY === 'true';
+  const chatHistoryProvider = env.CHAT_HISTORY_PROVIDER || 'oauth';
   const required = enableChatSummary
-    ? [...REQUIRED, 'TOKEN_ENCRYPTION_KEY', 'OAUTH_REDIRECT_URI']
+    ? chatHistoryProvider === 'lark-cli'
+      ? [...REQUIRED, 'ALLOWED_CHAT_SUMMARY_OPEN_ID']
+      : [...REQUIRED, 'TOKEN_ENCRYPTION_KEY', 'OAUTH_REDIRECT_URI']
     : REQUIRED;
   const missing = required.filter((key) => !env[key]?.trim());
+  if (!env.FEISHU_KNOWLEDGE_BASE_TOKEN?.trim() && !env.FEISHU_BASE_TOKEN?.trim()) {
+    missing.push('FEISHU_KNOWLEDGE_BASE_TOKEN');
+  }
+  if (!env.FEISHU_TASK_BASE_TOKEN?.trim() && !env.FEISHU_BASE_TOKEN?.trim()) {
+    missing.push('FEISHU_TASK_BASE_TOKEN');
+  }
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
@@ -21,7 +30,8 @@ export function loadConfig(env = process.env) {
     minimaxApiKey: env.MINIMAX_API_KEY,
     minimaxBaseUrl: env.MINIMAX_BASE_URL || 'https://api.minimaxi.com/v1',
     minimaxModel: env.MINIMAX_MODEL || 'MiniMax-M3',
-    baseToken: env.FEISHU_BASE_TOKEN,
+    knowledgeBaseToken: env.FEISHU_KNOWLEDGE_BASE_TOKEN || env.FEISHU_BASE_TOKEN,
+    taskBaseToken: env.FEISHU_TASK_BASE_TOKEN || env.FEISHU_BASE_TOKEN,
     knowledgeTableId: env.FEISHU_KNOWLEDGE_TABLE_ID,
     questionsTableId: env.FEISHU_QUESTIONS_TABLE_ID,
     embeddingApiKey: env.SILICONFLOW_API_KEY,
@@ -32,6 +42,9 @@ export function loadConfig(env = process.env) {
     tasksTableId: env.FEISHU_TASKS_TABLE_ID,
     membersTableId: env.FEISHU_MEMBERS_TABLE_ID,
     enableChatSummary,
+    chatHistoryProvider,
+    allowedChatSummaryOpenId: env.ALLOWED_CHAT_SUMMARY_OPEN_ID,
+    larkCliPath: env.LARK_CLI_PATH || 'lark-cli',
     statePath: env.TASK_ASSISTANT_STATE_PATH || '.data/task-assistant-state.json',
     tokenPath: env.USER_TOKEN_PATH || '.data/user-tokens.json',
     tokenEncryptionKey: env.TOKEN_ENCRYPTION_KEY,

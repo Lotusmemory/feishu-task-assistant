@@ -56,10 +56,37 @@ test('queries tasks without creating a confirmation or writing Base', async () =
   const { service, base, writes } = fixture({ tasks: [task] });
   const result = await service.prepare({ operation: 'query_tasks', selector: { name: '首页' }, fields: {} }, 'ou_actor');
 
-  assert.equal(result.kind, 'result');
+  assert.equal(result.kind, 'task_list');
   assert.match(result.text, /首页设计/);
   assert.deepEqual(base.selector, { name: '首页' });
   assert.deepEqual(writes, []);
+});
+
+test('binds a my-tasks query to the current Feishu sender', async () => {
+  const { service, base } = fixture();
+  await service.prepare({ operation: 'query_tasks', selector: { ownerOpenId: 'me' }, fields: {} }, 'ou_actor');
+  assert.deepEqual(base.selector, { ownerOpenId: 'ou_actor' });
+});
+
+test('returns editable current-user tasks for an unspecified edit request', async () => {
+  const editable = [
+    { ...task, recordId: 'todo', status: '未开始' },
+    { ...task, recordId: 'doing', status: '进行中' },
+    { ...task, recordId: 'blocked', status: '阻塞中' },
+    { ...task, recordId: 'postponed', status: '已延期' },
+  ];
+  const finished = { ...task, recordId: 'done', status: '已完成' };
+  const { service, base } = fixture({ tasks: [...editable, finished] });
+
+  const result = await service.prepare({
+    operation: 'edit_task_form',
+    selector: { ownerOpenId: 'me' },
+    fields: {},
+  }, 'ou_actor');
+
+  assert.equal(result.kind, 'edit_task_picker');
+  assert.deepEqual(base.selector, { ownerOpenId: 'ou_actor' });
+  assert.deepEqual(result.tasks.map(({ recordId }) => recordId), ['todo', 'doing', 'blocked', 'postponed']);
 });
 
 test('returns task candidates when a selector matches multiple tasks', async () => {
@@ -91,10 +118,22 @@ test('requires a new deadline before preparing postponement', async () => {
   );
 });
 
+test('requires a task name before preparing creation', async () => {
+  const { service, writes } = fixture();
+  assert.deepEqual(
+    await service.prepare({ operation: 'create_task', selector: {}, fields: {} }, 'ou_actor'),
+    { kind: 'need_input', field: '任务名', text: '请提供任务名。' },
+  );
+  assert.deepEqual(writes, []);
+});
+
 test('prepares create and delete previews without writing Base', async () => {
   const created = fixture();
   const create = await created.service.prepare({ operation: 'create_task', selector: {}, fields: { 任务名: '新任务' } }, 'ou_actor');
-  assert.deepEqual(create.preview, { operation: 'create_task', before: null, after: { 任务名: '新任务' } });
+  assert.deepEqual(create.preview, { operation: 'create_task', before: null, after: {
+    任务名: '新任务', 负责人: 'ou_actor', 状态: '未开始', 优先级: 'P0',
+    开始日期: 1_784_000_000_000, 截止日期: 1_784_025_000_000,
+  } });
   assert.match(create.confirmationId, /^cfm-/);
   assert.deepEqual(created.writes, []);
 
@@ -102,6 +141,37 @@ test('prepares create and delete previews without writing Base', async () => {
   const remove = await deleted.service.prepare({ operation: 'delete_task', selector: { name: '首页设计' }, fields: {} }, 'ou_actor');
   assert.deepEqual(remove.preview, { operation: 'delete_task', before: task, after: null });
   assert.deepEqual(deleted.writes, []);
+});
+
+test('resolves a delegated owner and lowers default priority by their active task count', async () => {
+  const activeTasks = [
+    { ...task, recordId: 'active-1', status: '进行中' },
+    { ...task, recordId: 'done', status: '已完成' },
+  ];
+  const { service, base } = fixture({ tasks: activeTasks, members: [{ name: '田嘉国', openId: 'ou_tian' }] });
+  const prepared = await service.prepare({
+    operation: 'create_task', selector: {}, fields: { 任务名: '喝水', 负责人: '田嘉国' },
+  }, 'ou_actor');
+
+  assert.equal(prepared.kind, 'confirmation');
+  assert.deepEqual(base.selector, { ownerOpenId: 'ou_tian' });
+  assert.deepEqual(prepared.preview.after, {
+    任务名: '喝水', 负责人: 'ou_tian', 状态: '未开始', 优先级: 'P1',
+    开始日期: 1_784_000_000_000, 截止日期: 1_784_025_000_000,
+  });
+});
+
+test('keeps explicitly supplied create defaults instead of overriding them', async () => {
+  const { service } = fixture({ members: [{ name: '田嘉国', openId: 'ou_tian' }] });
+  const prepared = await service.prepare({ operation: 'create_task', selector: {}, fields: {
+    任务名: '喝水', 负责人: '田嘉国', 状态: '进行中', 优先级: 'P2',
+    开始日期: 100, 截止日期: 200,
+  } }, 'ou_actor');
+
+  assert.deepEqual(prepared.preview.after, {
+    任务名: '喝水', 负责人: 'ou_tian', 状态: '进行中', 优先级: 'P2',
+    开始日期: 100, 截止日期: 200,
+  });
 });
 
 test('forces the complete-task patch instead of trusting model fields', async () => {

@@ -1,5 +1,9 @@
 const SYSTEM_PROMPT = '你是一个简洁、友善的客服助手。信息不足时明确说明，不要编造事实。';
 
+function stripThinking(value) {
+  return String(value || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+}
+
 export function createMiniMaxClient({ apiKey, baseUrl, model, fetchImpl = fetch, timeoutMs = 30_000 }) {
   async function complete(messages) {
     try {
@@ -11,7 +15,7 @@ export function createMiniMaxClient({ apiKey, baseUrl, model, fetchImpl = fetch,
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
-      const answer = data?.choices?.[0]?.message?.content?.trim();
+      const answer = stripThinking(data?.choices?.[0]?.message?.content);
       if (!answer) throw new Error('Empty answer');
       return answer;
     } catch (error) {

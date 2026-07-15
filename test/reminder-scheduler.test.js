@@ -36,6 +36,7 @@ async function fixture(overrides = {}) {
     messenger: {
       async sendCard(openId, card, uuid) { sent.push({ type: 'card', openId, card, uuid }); },
       async sendText(openId, text, uuid) { sent.push({ type: 'text', openId, text, uuid }); },
+      async updateCardByToken(token, card) { sent.push({ type: 'update', token, card }); },
     },
     onConsent: async () => {},
     logger: { error(...args) { errors.push(args); } },
@@ -115,9 +116,9 @@ test('logs a whole-run timer failure without rejecting and still schedules the n
   assert.equal(timers.length, 2);
 });
 
-test('confirms complete and continue callbacks only while the actor remains the current owner', async () => {
+test('confirms complete while continue leaves the task unchanged', async () => {
   const calls = [];
-  const { dependencies } = await fixture({
+  const { dependencies, sent } = await fixture({
     base: { async getTask() { calls.push(['get']); return { ...task, ownerOpenId: 'ou_a' }; } },
     taskService: {
       async prepare(intent, actorOpenId) { calls.push(['prepare', intent, actorOpenId]); return { kind: 'confirmation', confirmationId: 'cfm-1' }; },
@@ -131,7 +132,7 @@ test('confirms complete and continue callbacks only while the actor remains the 
     action: { value: { action: 'complete', taskId: 'rec1', batchId: '2026-07-14:ou_a' } },
   };
 
-  assert.deepEqual(await scheduler.handleCardAction(ownerEvent), { kind: 'result', text: '操作成功。' });
+  assert.deepEqual(await scheduler.handleCardAction({ ...ownerEvent, token: 'token-complete' }), { kind: 'result', text: '操作成功。' });
   assert.deepEqual(await scheduler.handleCardAction(ownerEvent), { kind: 'ignored', reason: 'duplicate' });
   assert.deepEqual(calls, [
     ['get'],
@@ -140,17 +141,18 @@ test('confirms complete and continue callbacks only while the actor remains the 
     ['confirm', 'cfm-1', 'ou_a'],
     ['get'],
   ]);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].type, 'update');
+  assert.deepEqual(sent[0].token, 'token-complete');
+  assert.match(JSON.stringify(sent[0].card), /任务操作已确认/);
 
   calls.length = 0;
   assert.deepEqual(await scheduler.handleCardAction({
     ...ownerEvent,
     context: { open_message_id: 'om_continue' },
     action: { value: { ...ownerEvent.action.value, action: 'continue' } },
-  }), { kind: 'result', text: '操作成功。' });
-  assert.deepEqual(calls[1], ['prepare', {
-    operation: 'update_task', selector: { recordId: 'rec1' }, fields: { 状态: '进行中' },
-  }, 'ou_a']);
-  assert.deepEqual(calls.at(-1), ['confirm', 'cfm-1', 'ou_a']);
+  }), { kind: 'result', text: '已继续处理，任务状态未修改。' });
+  assert.deepEqual(calls, [['get']]);
 });
 
 test('rejects non-owners without preparing, confirming, or messaging', async () => {
@@ -189,14 +191,10 @@ test('rechecks ownership before confirm and releases the callback claim when it 
   assert.deepEqual((await dependencies.store.read()).confirmations, {});
 });
 
-test('sends actionable follow-up text for block and postpone without confirming a write', async () => {
-  const calls = [];
+test('sends reason forms for block and postpone without writing immediately', async () => {
   const { dependencies, sent } = await fixture({
     base: { async getTask() { return { ...task, ownerOpenId: 'ou_a' }; } },
-    taskService: {
-      async prepare(intent) { calls.push(['prepare', intent]); return { kind: 'need_input', text: '需要输入' }; },
-      async confirm() { calls.push(['confirm']); },
-    },
+    taskService: { async prepare() { assert.fail('must not prepare before reason submit'); } },
   });
   const scheduler = createReminderScheduler(dependencies);
 
@@ -207,13 +205,38 @@ test('sends actionable follow-up text for block and postpone without confirming 
     });
   }
 
-  assert.equal(calls.filter(([name]) => name === 'prepare').length, 2);
-  assert.equal(calls.some(([name]) => name === 'confirm'), false);
   assert.equal(sent.length, 2);
-  assert.match(sent[0].text, /rec1.*阻塞原因/s);
-  assert.match(sent[1].text, /rec1.*截止日期/s);
+  assert.equal(sent.every(({ type }) => type === 'card'), true);
+  assert.match(JSON.stringify(sent[0].card), /submit_reason__block__rec1/);
+  assert.match(JSON.stringify(sent[1].card), /submit_reason__postpone__rec1/);
   assert.match(sent[0].uuid, /om_block.*block.*rec1/);
   assert.match(sent[1].uuid, /om_postpone.*postpone.*rec1/);
+});
+
+test('submitting a reason writes blocked or postponed status and updates the form card', async () => {
+  const calls = [];
+  const { dependencies, sent } = await fixture({
+    base: { async getTask() { return { ...task, ownerOpenId: 'ou_a' }; } },
+    taskService: {
+      async prepare(intent, actor) { calls.push(['prepare', intent, actor]); return { kind: 'confirmation', confirmationId: `cfm-${calls.length}` }; },
+      async confirm(id, actor) { calls.push(['confirm', id, actor]); return { kind: 'result', text: '操作成功。' }; },
+    },
+  });
+  const scheduler = createReminderScheduler(dependencies);
+
+  for (const action of ['block', 'postpone']) {
+    await scheduler.handleCardAction({
+      operator: { open_id: 'ou_a' }, token: `token-${action}`,
+      action: { name: `submit_reason__${action}__rec1`, form_value: { reason: '等待接口' } },
+    });
+  }
+
+  assert.deepEqual(calls.filter(([type]) => type === 'prepare').map(([, intent]) => intent.fields), [
+    { 状态: '阻塞中', 阻塞原因: '等待接口' },
+    { 状态: '已延期', 阻塞原因: '等待接口' },
+  ]);
+  assert.equal(calls.filter(([type]) => type === 'confirm').length, 2);
+  assert.deepEqual(sent.filter(({ type }) => type === 'update').map(({ token }) => token), ['token-block', 'token-postpone']);
 });
 
 test('releases a failed callback claim so the same event can retry', async () => {
@@ -236,7 +259,7 @@ test('releases a failed callback claim so the same event can retry', async () =>
   assert.equal(confirmations, 2);
 });
 
-test('uses the real task service to write complete and continue but not block or postpone', async () => {
+test('uses the real task service to write complete while other buttons do not write before form submit', async () => {
   const writes = [];
   const { dependencies, sent } = await fixture();
   const base = {
@@ -268,9 +291,8 @@ test('uses the real task service to write complete and continue but not block or
 
   assert.deepEqual(writes, [
     ['rec1', { 状态: '已完成', 进度: 100, 完成时间: NOW.getTime() }],
-    ['rec1', { 状态: '进行中' }],
   ]);
-  assert.equal(sent.filter(({ type }) => type === 'text').length, 2);
+  assert.equal(sent.filter(({ type }) => type === 'card').length, 2);
 });
 
 test('persists split cards independently and restart retries only the failed part', async () => {

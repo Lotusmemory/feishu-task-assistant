@@ -3,11 +3,14 @@ const REQUIRED = [
   'FEISHU_BASE_TOKEN', 'FEISHU_KNOWLEDGE_TABLE_ID', 'FEISHU_QUESTIONS_TABLE_ID',
   'SILICONFLOW_API_KEY',
   'FEISHU_TASKS_TABLE_ID', 'FEISHU_MEMBERS_TABLE_ID',
-  'TOKEN_ENCRYPTION_KEY', 'OAUTH_REDIRECT_URI',
 ];
 
 export function loadConfig(env = process.env) {
-  const missing = REQUIRED.filter((key) => !env[key]?.trim());
+  const enableChatSummary = env.ENABLE_CHAT_SUMMARY === 'true';
+  const required = enableChatSummary
+    ? [...REQUIRED, 'TOKEN_ENCRYPTION_KEY', 'OAUTH_REDIRECT_URI']
+    : REQUIRED;
+  const missing = required.filter((key) => !env[key]?.trim());
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
@@ -28,6 +31,7 @@ export function loadConfig(env = process.env) {
     indexPath: env.KNOWLEDGE_INDEX_PATH || '.data/knowledge-index.json',
     tasksTableId: env.FEISHU_TASKS_TABLE_ID,
     membersTableId: env.FEISHU_MEMBERS_TABLE_ID,
+    enableChatSummary,
     statePath: env.TASK_ASSISTANT_STATE_PATH || '.data/task-assistant-state.json',
     tokenPath: env.USER_TOKEN_PATH || '.data/user-tokens.json',
     tokenEncryptionKey: env.TOKEN_ENCRYPTION_KEY,

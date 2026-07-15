@@ -45,11 +45,13 @@ npm start
 
 看到长连接成功日志后，在飞书中进行测试。程序停止后，重新运行 `npm start` 即可再次连接。
 
-任务助理还需要配置任务表、成员表、状态文件、用户令牌文件、32 字节 base64 加密密钥、OAuth 回调和端口。完整字段见 `.env.example`。生成密钥可使用：
+任务助理需要配置任务表、成员表和状态文件；启用聊天总结时，才需要用户令牌文件、32 字节 base64 加密密钥、OAuth 回调和端口。完整字段见 `.env.example`。生成密钥可使用：
 
 ```bash
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 ```
+
+如果先关闭聊天总结，设置 `ENABLE_CHAT_SUMMARY=false`。此时不需要填写 `TOKEN_ENCRYPTION_KEY` 和 `OAUTH_REDIRECT_URI`，程序也不会启动公网 HTTP/OAuth 服务或发送聊天授权卡；任务管理、18:00 提醒和 Leader 汇总仍正常运行。
 
 服务必须持续运行，18:00 调度才会执行。开发或人工验收可在测试中注入固定时钟，或调用组装后暴露的 `application.scheduler.runNow(date)`，无需等待真实 18:00。
 

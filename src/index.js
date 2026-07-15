@@ -36,10 +36,10 @@ function chatWindow(at = new Date()) {
 export async function createApplication({ config = loadConfig(), sdk = lark, logger = console } = {}) {
   const baseConfig = { appId: config.feishuAppId, appSecret: config.feishuAppSecret, domain: sdk.Domain.Feishu };
   const client = new sdk.Client({ ...baseConfig, appType: sdk.AppType.SelfBuild });
-  const safeUserClient = new sdk.Client({
+  const safeUserClient = config.enableChatSummary ? new sdk.Client({
     ...baseConfig, appType: sdk.AppType.SelfBuild,
     logger: NOOP_LOGGER, loggerLevel: sdk.LoggerLevel.fatal,
-  });
+  }) : null;
   const minimax = createMiniMaxClient({ apiKey: config.minimaxApiKey, baseUrl: config.minimaxBaseUrl, model: config.minimaxModel });
   const embedder = createEmbedder({ apiKey: config.embeddingApiKey, baseUrl: config.embeddingBaseUrl, model: config.embeddingModel });
   const base = createBaseClient({
@@ -51,22 +51,26 @@ export async function createApplication({ config = loadConfig(), sdk = lark, log
     path: config.statePath,
     defaultValue: { confirmations: {}, reminderRuns: {}, reminderSnapshots: {}, oauthStates: {} },
   });
-  const tokenStore = createJsonStore({ path: config.tokenPath, defaultValue: { users: {} } });
   const confirmations = createConfirmationStore({ store: stateStore, ttlMs: CONFIRMATION_TTL_MS });
   const members = createMemberService({ base });
   const taskService = createTaskService({ base, members, confirmations });
   const taskIntent = createTaskIntentParser({ minimax });
   const messenger = createFeishuMessenger({ client });
   const reminderService = createReminderService({ base, members });
-  const vault = createTokenVault({ store: tokenStore, encryptionKey: config.tokenEncryptionKey });
-  const oauth = createOAuthServer({
+  const tokenStore = config.enableChatSummary
+    ? createJsonStore({ path: config.tokenPath, defaultValue: { users: {} } })
+    : null;
+  const vault = config.enableChatSummary
+    ? createTokenVault({ store: tokenStore, encryptionKey: config.tokenEncryptionKey })
+    : null;
+  const oauth = config.enableChatSummary ? createOAuthServer({
     codeExchanger: createSafeOAuthCodeExchanger({
       appId: config.feishuAppId, appSecret: config.feishuAppSecret, domain: sdk.Domain.Feishu,
     }),
     vault, redirectUri: config.oauthRedirectUri, port: config.port, stateStore,
-  });
-  const chatHistory = createChatHistory({ client: safeUserClient, vault });
-  const chatSummary = createChatSummary({ minimax, taskService });
+  }) : null;
+  const chatHistory = config.enableChatSummary ? createChatHistory({ client: safeUserClient, vault }) : null;
+  const chatSummary = config.enableChatSummary ? createChatSummary({ minimax, taskService }) : null;
 
   let currentIndex = createVectorIndex([], { threshold: config.embeddingThreshold });
   try {
@@ -91,6 +95,7 @@ export async function createApplication({ config = loadConfig(), sdk = lark, log
 
   const scheduler = createReminderScheduler({
     store: stateStore, reminderService, messenger, base, taskService,
+    consentEnabled: config.enableChatSummary,
     async onConsent(action) {
       if (action.action === 'decline_chat_summary') {
         await messenger.sendText(action.actorOpenId, '已拒绝，本次不会读取聊天。', `consent-declined:${Date.now()}:${action.actorOpenId}`);
@@ -126,7 +131,7 @@ export async function createApplication({ config = loadConfig(), sdk = lark, log
   return {
     scheduler,
     async start() {
-      await oauth.start();
+      if (oauth) await oauth.start();
       try {
         try { currentIndex = await knowledgeSync.sync(); }
         catch (error) { logger.error('Knowledge sync failed; keeping last valid index', { error }); }
@@ -140,14 +145,14 @@ export async function createApplication({ config = loadConfig(), sdk = lark, log
       } catch (error) {
         scheduler.stop();
         if (syncTimer) clearInterval(syncTimer);
-        await oauth.stop();
+        if (oauth) await oauth.stop();
         throw error;
       }
     },
     async stop() {
       scheduler.stop();
       if (syncTimer) clearInterval(syncTimer);
-      await oauth.stop();
+      if (oauth) await oauth.stop();
     },
   };
 }

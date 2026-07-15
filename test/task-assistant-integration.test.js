@@ -95,3 +95,19 @@ test('runs task confirmation, idempotent reminders and authorized chat draft con
   await taskService.confirm(result.drafts[0].draftId, 'ou_owner');
   assert.equal(writes.length, 2);
 });
+
+test('does not send chat consent cards when chat summaries are disabled', async () => {
+  const sent = [];
+  const scheduler = createReminderScheduler({
+    store: memoryStore(),
+    reminderService: { async buildPlan() { return {
+      owners: [{ openId: 'ou_owner', tasks: [{ recordId: 'r1', name: '任务' }] }],
+      leaders: [], warnings: [],
+    }; } },
+    messenger: { async sendCard(openId, card) { sent.push({ openId, card }); } },
+    consentEnabled: false,
+  });
+  await scheduler.runNow(new Date('2026-07-15T18:00:00+08:00'));
+  assert.equal(sent.length, 1);
+  assert.doesNotMatch(JSON.stringify(sent), /聊天摘要授权|consent_chat_summary/);
+});

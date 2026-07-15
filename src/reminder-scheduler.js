@@ -33,6 +33,7 @@ export function createReminderScheduler({
   base,
   taskService,
   onConsent,
+  consentEnabled = true,
   logger = console,
 }) {
   let running = false;
@@ -151,12 +152,14 @@ export function createReminderScheduler({
         recipientErrors,
       );
     }
-    for (const owner of plan.owners) {
-      await sendOnce(dateKey, 'consent', owner.openId, owner.openId, () => messenger.sendCard(
-        owner.openId,
-        buildConsentCard(),
-        `consent:${dateKey}:${owner.openId}`,
-      ), recipientErrors);
+    if (consentEnabled) {
+      for (const owner of plan.owners) {
+        await sendOnce(dateKey, 'consent', owner.openId, owner.openId, () => messenger.sendCard(
+          owner.openId,
+          buildConsentCard(),
+          `consent:${dateKey}:${owner.openId}`,
+        ), recipientErrors);
+      }
     }
     return { ...plan, recipientErrors };
   }

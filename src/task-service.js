@@ -10,8 +10,12 @@ function formatTask(task) {
 async function resolveOwner(fields, members) {
   if (!('负责人' in fields) || typeof fields['负责人'] !== 'string') return fields;
   const matches = await members.resolveByName(fields['负责人']);
-  if (matches.length !== 1) return null;
-  return { ...fields, 负责人: matches[0].openId };
+  if (matches.length === 1) return { ...fields, 负责人: matches[0].openId };
+  if (matches.length > 1) return null;
+  if (typeof members.refresh !== 'function') return null;
+  const openIdMatches = (await members.refresh()).filter((member) => member.openId === fields['负责人']);
+  if (openIdMatches.length !== 1) return null;
+  return { ...fields, 负责人: openIdMatches[0].openId };
 }
 
 export function createTaskService({ base, members, confirmations, clock = Date.now }) {

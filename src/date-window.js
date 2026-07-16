@@ -7,9 +7,9 @@ export function shanghaiDayWindow(now = new Date()) {
   return { dateKey, startSeconds: startMs / 1000, endSeconds: startMs / 1000 + 86_400 - 1 };
 }
 
-export function millisecondsUntilNextRun(now = new Date(), hour = 18) {
+export function millisecondsUntilNextRun(now = new Date(), hour = 18, minute = 0) {
   const { dateKey } = shanghaiDayWindow(now);
-  let target = Date.parse(`${dateKey}T${String(hour).padStart(2, '0')}:00:00+08:00`);
+  let target = Date.parse(`${dateKey}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+08:00`);
   if (target <= now.getTime()) target += 86_400_000;
   return target - now.getTime();
 }

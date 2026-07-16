@@ -193,13 +193,25 @@ export function createMessageHandler({
         await replyCard(message.message_id, buildTaskConfirmationCard(response));
       } else if (response.kind === 'knowledge_answer' && replyCard) {
         await replyCard(message.message_id, buildKnowledgeAnswerCard(response.text));
+      } else if (replyCard) {
+        await replyCard(
+          message.message_id,
+          buildKnowledgeAnswerCard(response.text || formatTaskResponse(response), { title: '客服助手' }),
+        );
       } else {
         await reply(message.message_id, response.text || formatTaskResponse(response));
       }
     } catch (error) {
       logger.error('Message processing failed', { messageId: message.message_id, error });
       try {
-        await reply(message.message_id, '暂时无法回答，请稍后重试');
+        if (replyCard) {
+          await replyCard(
+            message.message_id,
+            buildKnowledgeAnswerCard('暂时无法回答，请稍后重试。', { title: '处理失败' }),
+          );
+        } else {
+          await reply(message.message_id, '暂时无法回答，请稍后重试');
+        }
       } catch (replyError) {
         logger.error('Fallback reply failed', { messageId: message.message_id, error: replyError });
       }
@@ -210,6 +222,7 @@ export function createMessageHandler({
 export function createTaskConfirmationActionHandler({ taskService, messenger, schedule = setTimeout, logger = console }) {
   const pendingCreates = new Set();
   const pendingEdits = new Set();
+  const pendingEditSelections = new Set();
 
   return async function handle(event) {
     const create = parseTaskCreateFormAction(event);
@@ -316,20 +329,39 @@ export function createTaskConfirmationActionHandler({ taskService, messenger, sc
     }
     const selection = parseTaskEditSelectionAction(event);
     if (selection) {
-      const prepared = await taskService.prepare({
-        operation: 'edit_task_form',
-        selector: { recordId: selection.taskId, ownerOpenId: selection.actorOpenId },
-        fields: {},
-      }, selection.actorOpenId);
-      const card = prepared.kind === 'edit_form'
-        ? buildTaskEditCard(prepared.task)
-        : buildTaskConfirmationResultCard(prepared.text || '没有找到匹配的任务。');
       const messageId = event?.context?.open_message_id || event?.open_message_id;
-      if (messenger && messageId) {
-        await messenger.updateCard(messageId, card);
-        return undefined;
+      const selectionKey = messageId || `${selection.actorOpenId}:${selection.taskId}`;
+      if (pendingEditSelections.has(selectionKey)) return undefined;
+      pendingEditSelections.add(selectionKey);
+      try {
+        if (messenger && messageId) {
+          await messenger.updateCard(messageId, buildTaskOperationProcessingCard('edit_task_form'));
+        }
+        const prepared = await taskService.prepare({
+          operation: 'edit_task_form',
+          selector: { recordId: selection.taskId, ownerOpenId: selection.actorOpenId },
+          fields: {},
+        }, selection.actorOpenId);
+        const card = prepared.kind === 'edit_form'
+          ? buildTaskEditCard(prepared.task)
+          : buildTaskConfirmationResultCard(prepared.text || '没有找到匹配的任务。');
+        if (messenger && messageId) {
+          await messenger.updateCard(messageId, card);
+          return undefined;
+        }
+        return card;
+      } catch (error) {
+        if (messenger && messageId) {
+          try {
+            await messenger.updateCard(messageId, buildTaskConfirmationResultCard('加载失败，请重新发起修改任务。'));
+          } catch (updateError) {
+            logger.error('Task edit selection failure card update failed', { messageId, error: updateError });
+          }
+        }
+        throw error;
+      } finally {
+        pendingEditSelections.delete(selectionKey);
       }
-      return card;
     }
     const scopeSelection = parseTaskScopeSelectionAction(event);
     if (scopeSelection) {

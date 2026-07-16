@@ -16,7 +16,7 @@ import { createConfirmationStore } from './confirmation-store.js';
 import { createMemberService } from './member-service.js';
 import { createTaskService } from './task-service.js';
 import { createTaskIntentParser } from './task-intent.js';
-import { createFeishuMessenger } from './feishu-messenger.js';
+import { buildChatSummaryStatusCard, createFeishuMessenger } from './feishu-messenger.js';
 import { createReminderService } from './reminder-service.js';
 import { createReminderScheduler } from './reminder-scheduler.js';
 import { createTokenVault } from './token-vault.js';
@@ -117,22 +117,33 @@ export async function createApplication({ config = loadConfig(), sdk = lark, log
 
   const scheduler = createReminderScheduler({
     store: stateStore, reminderService, messenger, base, taskService,
-    consentEnabled: config.enableChatSummary,
     async onConsent(action) {
       if (action.action === 'decline_chat_summary') {
-        await messenger.sendText(action.actorOpenId, '已拒绝，本次不会读取聊天。', `consent-declined:${Date.now()}:${action.actorOpenId}`);
+        await messenger.sendCard(
+          action.actorOpenId,
+          buildChatSummaryStatusCard({ title: '聊天总结授权', text: '已拒绝，本次不会读取聊天。' }),
+          `consent-declined:${Date.now()}:${action.actorOpenId}`,
+        );
         return { kind: 'result', text: '已拒绝。' };
       }
       try {
         const history = await chatHistory.listTextMessages(action.actorOpenId, chatWindow());
         const result = await chatSummary.summarize(history.messages, action.actorOpenId);
         const suffix = history.incomplete ? '\n注意：平台分页限制导致摘要可能不完整。' : '';
-        await messenger.sendText(action.actorOpenId, `${result.summaryText}${suffix}`, `chat-summary:${Date.now()}:${action.actorOpenId}`);
+        await messenger.sendCard(
+          action.actorOpenId,
+          buildChatSummaryStatusCard({ title: '聊天总结完成', text: `${result.summaryText}${suffix}` }),
+          `chat-summary:${Date.now()}:${action.actorOpenId}`,
+        );
         return { kind: 'result', ...result, incomplete: history.incomplete };
       } catch (error) {
         if (!(error instanceof UserAuthorizationRequired)) throw error;
         const url = await oauth.authorizationUrl(action.actorOpenId);
-        await messenger.sendText(action.actorOpenId, `请先完成授权：${url}`, `oauth-required:${Date.now()}:${action.actorOpenId}`);
+        await messenger.sendCard(
+          action.actorOpenId,
+          buildChatSummaryStatusCard({ title: '需要聊天授权', text: `请先完成授权：${url}` }),
+          `oauth-required:${Date.now()}:${action.actorOpenId}`,
+        );
         return { kind: 'authorization_required' };
       }
     },
@@ -140,7 +151,6 @@ export async function createApplication({ config = loadConfig(), sdk = lark, log
   });
   const handler = createMessageHandler({
     taskIntent, taskService, chatSummaryRequest, assistant,
-    reply: (messageId, text) => messenger.replyText(messageId, text),
     replyCard: (messageId, card) => messenger.replyCard(messageId, card),
     messenger, deduplicator: createDeduplicator(), logger,
   });

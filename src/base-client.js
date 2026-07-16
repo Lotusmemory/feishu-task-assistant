@@ -142,6 +142,10 @@ export function createBaseClient({
         && task.status !== '已完成');
     },
 
+    async listTasks() {
+      return listTaskRecords('List tasks');
+    },
+
     async searchTasks({ name, ownerOpenId }) {
       return (await listTaskRecords('Search tasks')).filter((task) => (!name || task.name.includes(name))
         && (!ownerOpenId || task.ownerOpenId === ownerOpenId));

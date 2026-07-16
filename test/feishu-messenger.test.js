@@ -11,9 +11,13 @@ import {
   buildTaskIntentProcessingCard,
   buildTaskOperationProcessingCard,
   buildTaskConfirmationProcessingCard,
+  buildReminderActionProcessingCard,
+  buildReminderActionStatusCard,
   buildTaskEditCard,
   buildTaskEditProcessingCard,
   buildTaskEditPickerCard,
+  buildStartTaskPickerCard,
+  buildStartTaskDeadlineCard,
   buildTaskScopeChoiceCard,
   buildTaskReviewProcessingCard,
   buildMyTasksCard,
@@ -30,6 +34,8 @@ import {
   parseTaskEditFormAction,
   parseTaskEditSelectionAction,
   parseTaskScopeSelectionAction,
+  parseStartTaskSelectionAction,
+  parseStartTaskFormAction,
   parseReminderReasonAction,
 } from '../src/feishu-messenger.js';
 
@@ -208,6 +214,22 @@ test('builds and parses a task edit picker card', () => {
   }), { actorOpenId: 'ou_actor', taskId: 'rec1' });
 });
 
+test('builds and parses the card-only start-task flow', () => {
+  const task = { recordId: 'rec1', name: '首页设计', status: '未开始', priority: 'P0' };
+  const picker = buildStartTaskPickerCard([task]);
+  const deadline = buildStartTaskDeadlineCard(task);
+  assert.match(JSON.stringify(picker), /select_start_task/);
+  assert.match(JSON.stringify(deadline), /picker_date/);
+  assert.doesNotMatch(JSON.stringify(deadline), /picker_datetime/);
+  assert.match(JSON.stringify(deadline), /18:30/);
+  assert.deepEqual(parseStartTaskSelectionAction({
+    operator: { open_id: 'ou_a' }, action: { value: { action: 'select_start_task', taskId: 'rec1' } },
+  }), { actorOpenId: 'ou_a', taskId: 'rec1' });
+  assert.deepEqual(parseStartTaskFormAction({
+    operator: { open_id: 'ou_a' }, action: { name: 'submit_start_task__rec1', form_value: { deadline_date: '2026-07-17 +0800' } },
+  }), { actorOpenId: 'ou_a', taskId: 'rec1', deadlineDate: '2026-07-17 +0800' });
+});
+
 test('builds and parses a task create form', () => {
   const card = buildTaskCreateCard();
   const serialized = JSON.stringify(card);
@@ -238,6 +260,16 @@ test('builds read-only task understanding and operation processing cards', () =>
   assert.equal(preparing.header.title.content, '正在准备删除任务');
   assert.equal(confirming.header.title.content, '正在执行任务操作');
   assert.doesNotMatch(JSON.stringify([understanding, preparing, confirming]), /button|callback/);
+});
+
+test('builds read-only reminder action transition cards', () => {
+  const processing = buildReminderActionProcessingCard({ name: '喝水' }, 'block');
+  const waiting = buildReminderActionStatusCard('请填写阻塞原因', '已发送原因填写卡片。');
+
+  assert.equal(processing.header.title.content, '正在填写阻塞原因');
+  assert.match(JSON.stringify(processing), /喝水/);
+  assert.equal(waiting.header.title.content, '请填写阻塞原因');
+  assert.doesNotMatch(JSON.stringify([processing, waiting]), /button|callback/);
 });
 
 test('preserves delegated owner in a task create form', () => {

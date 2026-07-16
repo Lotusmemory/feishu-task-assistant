@@ -93,6 +93,42 @@ test('routes a parsed task intent without calling the RAG assistant', async () =
   ]);
 });
 
+test('uses a card for a generic task result when card replies are available', async () => {
+  const calls = [];
+  const handler = createMessageHandler({
+    taskIntent: { async parse() { return { operation: 'query_tasks', selector: {}, fields: {} }; } },
+    taskService: { async prepare() { return { kind: 'result', text: '没有找到匹配的任务。' }; } },
+    assistant: { async answer() { return 'unused'; } },
+    reply: async () => assert.fail('must not reply with text'),
+    replyCard: async (messageId, card) => calls.push([messageId, card]),
+    deduplicator: createDeduplicator(), logger: { error() {} },
+  });
+
+  await handler(event({ content: '{"text":"查询任务"}' }));
+
+  assert.equal(calls[0][0], 'om_1');
+  assert.equal(calls[0][1].schema, '2.0');
+  assert.match(JSON.stringify(calls[0][1]), /没有找到匹配的任务/);
+});
+
+test('uses a failure card instead of text when synchronous processing fails', async () => {
+  const calls = [];
+  const handler = createMessageHandler({
+    taskIntent: { async parse() { throw new Error('secret failure'); } },
+    assistant: { async answer() { return 'unused'; } },
+    reply: async () => assert.fail('must not reply with text'),
+    replyCard: async (messageId, card) => calls.push([messageId, card]),
+    deduplicator: createDeduplicator(), logger: { error() {} },
+  });
+
+  await handler(event());
+
+  assert.equal(calls[0][0], 'om_1');
+  assert.equal(calls[0][1].header.title.content, '处理失败');
+  assert.match(JSON.stringify(calls[0][1]), /暂时无法回答/);
+  assert.doesNotMatch(JSON.stringify(calls[0][1]), /secret failure/);
+});
+
 test('shows task understanding and operation cards before parsing and preparing', async () => {
   const calls = [];
   const scheduled = [];
@@ -452,15 +488,50 @@ test('turns an edit-task selection into the existing edit card', async () => {
     action: { value: { action: 'edit_task', taskId: 'rec1' } },
   });
 
-  assert.deepEqual(calls[0], [
+  assert.equal(calls[0][0], 'update');
+  assert.equal(calls[0][1], 'om_card');
+  assert.equal(calls[0][2].header.title.content, '正在加载任务信息');
+  assert.deepEqual(calls[1], [
     'prepare',
     { operation: 'edit_task_form', selector: { recordId: 'rec1', ownerOpenId: 'ou_actor' }, fields: {} },
     'ou_actor',
   ]);
-  assert.equal(calls[1][0], 'update');
-  assert.equal(calls[1][1], 'om_card');
-  assert.match(JSON.stringify(calls[1][2]), /submit_edit__rec1/);
+  assert.equal(calls[2][0], 'update');
+  assert.equal(calls[2][1], 'om_card');
+  assert.match(JSON.stringify(calls[2][2]), /submit_edit__rec1/);
   assert.equal(result, undefined);
+});
+
+test('ignores another edit-task selection while the same picker card is loading', async () => {
+  const calls = [];
+  let releasePrepare;
+  const preparePending = new Promise((resolve) => { releasePrepare = resolve; });
+  const handle = createTaskConfirmationActionHandler({
+    taskService: { async prepare(intent) {
+      calls.push(['prepare', intent.selector.recordId]);
+      await preparePending;
+      return { kind: 'edit_form', task: { recordId: intent.selector.recordId, name: '喝水', status: '进行中' } };
+    } },
+    messenger: { async updateCard(messageId, card) { calls.push(['update', messageId, card.header.title.content]); } },
+  });
+  const selectionEvent = (taskId) => ({
+    operator: { open_id: 'ou_actor' }, context: { open_message_id: 'om_card' },
+    action: { value: { action: 'edit_task', taskId } },
+  });
+
+  const first = handle(selectionEvent('rec1'));
+  await new Promise((resolve) => setImmediate(resolve));
+  const second = handle(selectionEvent('rec2'));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(calls.slice(0, 2), [
+    ['update', 'om_card', '正在加载任务信息'],
+    ['prepare', 'rec1'],
+  ]);
+  assert.equal(calls.filter((call) => call[0] === 'prepare').length, 1);
+  releasePrepare();
+  await Promise.all([first, second]);
+  assert.equal(calls.at(-1)[2], '编辑任务：喝水');
 });
 
 test('keeps delegated owner context when asking for a task name', async () => {
@@ -590,6 +661,24 @@ test('routes an explicit time-range summary before task parsing or RAG', async (
   ]);
 });
 
+test('uses a card for a completed chat summary result', async () => {
+  const calls = [];
+  const handler = createMessageHandler({
+    chatSummaryRequest: { async handle() { return { kind: 'result', text: '聊天摘要内容' }; } },
+    taskIntent: { async parse() { return null; } },
+    taskService: {},
+    assistant: { async answer() { return 'unused'; } },
+    reply: async () => assert.fail('must not reply with text'),
+    replyCard: async (messageId, card) => calls.push([messageId, card]),
+    deduplicator: createDeduplicator(), logger: { error() {} },
+  });
+
+  await handler(event({ content: '{"text":"总结 2026-07-01 到 2026-07-15 的聊天"}' }));
+
+  assert.equal(calls[0][1].schema, '2.0');
+  assert.match(JSON.stringify(calls[0][1]), /聊天摘要内容/);
+});
+
 test('replies immediately with a processing card and updates it after chat summary completes', async () => {
   const calls = [];
   let scheduled;
@@ -659,6 +748,22 @@ test('routes text confirmation directly to the task service for the sender', asy
     ['confirm', 'cfm-1', 'ou_actor'],
     ['reply', 'om_1', '操作成功。'],
   ]);
+});
+
+test('uses a card for a text confirmation result when card replies are available', async () => {
+  const calls = [];
+  const handler = createMessageHandler({
+    taskService: { async confirm() { return { kind: 'result', text: '操作成功。' }; } },
+    assistant: { async answer() { return 'unused'; } },
+    reply: async () => assert.fail('must not reply with text'),
+    replyCard: async (messageId, card) => calls.push([messageId, card]),
+    deduplicator: createDeduplicator(), logger: { error() {} },
+  });
+
+  await handler(event({ content: '{"text":"确认 cfm-1"}' }));
+
+  assert.equal(calls[0][1].schema, '2.0');
+  assert.match(JSON.stringify(calls[0][1]), /操作成功/);
 });
 
 test('routes text cancellation directly to the task service for the sender', async () => {

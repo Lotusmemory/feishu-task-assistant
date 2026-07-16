@@ -320,11 +320,11 @@ export function buildTaskCreateProcessingCard(taskName) {
   };
 }
 
-function buildTaskProcessingCard(title, text) {
+function buildTaskProcessingCard(title, text, template = 'blue') {
   return {
     schema: '2.0',
     config: { width_mode: 'default', update_multi: true },
-    header: { template: 'blue', title: plainText(title), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
+    header: { template, title: plainText(title), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
     body: { elements: [{ tag: 'markdown', content: text }] },
   };
 }
@@ -350,6 +350,23 @@ export function buildTaskConfirmationProcessingCard(action) {
     cancelling ? '正在取消任务操作' : '正在执行任务操作',
     cancelling ? '正在取消本次操作，请稍候…' : '正在写入任务数据，请勿重复提交…',
   );
+}
+
+export function buildReminderActionProcessingCard(task, action) {
+  const titles = {
+    complete: '正在完成任务',
+    continue: '正在确认继续处理',
+    block: '正在填写阻塞原因',
+    postpone: '正在填写延期原因',
+  };
+  return buildTaskProcessingCard(
+    titles[action] || '正在处理任务',
+    `正在处理“${truncateText(task?.name || '未命名任务', 200)}”，请稍候…`,
+  );
+}
+
+export function buildReminderActionStatusCard(title, text, { template = 'blue' } = {}) {
+  return buildTaskProcessingCard(title, truncateText(text, 500), template);
 }
 
 export function buildTaskReviewProcessingCard() {
@@ -432,6 +449,48 @@ export function buildTaskEditPickerCard(tasks) {
   };
 }
 
+export function buildStartTaskPickerCard(tasks) {
+  return {
+    schema: '2.0', config: { width_mode: 'default', update_multi: true },
+    header: { template: 'orange', title: plainText('请选择今天要开始的任务'), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
+    body: {
+      direction: 'vertical', padding: '12px 12px 20px 12px', vertical_spacing: '12px',
+      elements: [
+        { tag: 'markdown', content: '你当前没有进行中的任务，请选择一项未开始任务。' },
+        ...tasks.map((task) => ({
+          tag: 'column_set', background_style: 'orange-50', horizontal_spacing: '8px', columns: [
+            { tag: 'column', width: 'weighted', weight: 3, elements: [
+              { tag: 'markdown', content: `**${truncateText(task.name, 200)}**` },
+              { tag: 'markdown', content: `优先级：${task.priority || '未设置'}`, text_size: 'notation' },
+            ] },
+            { tag: 'column', width: 'weighted', weight: 1, elements: [
+              callbackButton('开始执行', 'primary_filled', { action: 'select_start_task', taskId: task.recordId }),
+            ] },
+          ],
+        })),
+      ],
+    },
+  };
+}
+
+export function buildStartTaskDeadlineCard(task) {
+  return {
+    schema: '2.0', config: { width_mode: 'default', update_multi: true },
+    header: { template: 'blue', title: plainText(`开始任务：${truncateText(task.name, 100)}`), icon: { tag: 'standard_icon', token: 'todo_colorful' } },
+    body: { elements: [{
+      tag: 'form', name: `start_task_${task.recordId}`, vertical_spacing: '12px', elements: [
+        { tag: 'markdown', content: '请选择截止日期，截止时间将自动设为当天 18:30。' },
+        { tag: 'picker_date', name: 'deadline_date', required: true, placeholder: plainText('请选择截止日期'), width: 'fill' },
+        { tag: 'button', name: `submit_start_task__${task.recordId}`, text: plainText('确认开始'), type: 'primary_filled', width: 'fill', form_action_type: 'submit' },
+      ],
+    }] },
+  };
+}
+
+export function buildStartTaskProcessingCard(title = '正在加载任务') {
+  return buildTaskProcessingCard(title, '正在核对任务状态，请稍候…');
+}
+
 export function parseTaskCreateFormAction(event) {
   const actorOpenId = event?.operator?.open_id;
   const name = event?.action?.name;
@@ -488,6 +547,23 @@ export function parseTaskScopeSelectionAction(event) {
   if (typeof actorOpenId !== 'string' || !actorOpenId || !value || typeof value !== 'object') return null;
   if (value.action !== 'query_task_scope' || !['self', 'all'].includes(value.scope)) return null;
   return { actorOpenId, scope: value.scope };
+}
+
+export function parseStartTaskSelectionAction(event) {
+  const actorOpenId = event?.operator?.open_id;
+  const value = event?.action?.value;
+  if (!actorOpenId || value?.action !== 'select_start_task' || typeof value.taskId !== 'string' || !value.taskId) return null;
+  return { actorOpenId, taskId: value.taskId };
+}
+
+export function parseStartTaskFormAction(event) {
+  const actorOpenId = event?.operator?.open_id;
+  const name = event?.action?.name;
+  let values = event?.action?.form_value;
+  if (typeof values === 'string') { try { values = JSON.parse(values); } catch { return null; } }
+  const match = typeof name === 'string' ? name.match(/^submit_start_task__(.+)$/) : null;
+  if (!actorOpenId || !match || typeof values?.deadline_date !== 'string' || !values.deadline_date) return null;
+  return { actorOpenId, taskId: match[1], deadlineDate: values.deadline_date };
 }
 
 export function parseCardAction(event) {

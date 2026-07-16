@@ -12,3 +12,8 @@ test('schedules the next 18:00 Shanghai run', () => {
   assert.equal(millisecondsUntilNextRun(new Date('2026-07-14T09:00:00Z'), 18), 3_600_000);
   assert.equal(millisecondsUntilNextRun(new Date('2026-07-14T11:00:00Z'), 18), 82_800_000);
 });
+
+test('schedules the next 09:30 Shanghai run', () => {
+  assert.equal(millisecondsUntilNextRun(new Date('2026-07-14T01:00:00Z'), 9, 30), 1_800_000);
+  assert.equal(millisecondsUntilNextRun(new Date('2026-07-14T02:00:00Z'), 9, 30), 84_600_000);
+});

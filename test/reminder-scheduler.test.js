@@ -36,6 +36,7 @@ async function fixture(overrides = {}) {
     messenger: {
       async sendCard(openId, card, uuid) { sent.push({ type: 'card', openId, card, uuid }); },
       async sendText(openId, text, uuid) { sent.push({ type: 'text', openId, text, uuid }); },
+      async updateCard(messageId, card) { sent.push({ type: 'update', messageId, card }); },
       async updateCardByToken(token, card) { sent.push({ type: 'update', token, card }); },
     },
     onConsent: async () => {},
@@ -55,13 +56,13 @@ test('persists each successful recipient and does not resend after restart', asy
   });
   await restarted.runNow(NOW);
 
-  assert.equal(sent.length, 3);
+  assert.equal(sent.length, 2);
   const state = await dependencies.store.read();
   assert.deepEqual(state.reminderRuns, {
       '2026-07-14': {
         owner: { 'ou_a:1/1': 'sent' },
         leader: { 'ou_l:1/1': 'sent' },
-        consent: { ou_a: 'sent' },
+        consent: {},
       },
   });
   assert.deepEqual(state.confirmations, {});
@@ -80,28 +81,29 @@ test('isolates recipient failures and only persists successful sends', async () 
   });
   await createReminderScheduler(dependencies).runNow(NOW);
 
-  assert.deepEqual(sent.map(({ openId }) => openId), ['ou_l', 'ou_a']);
+  assert.deepEqual(sent.map(({ openId }) => openId), ['ou_l']);
   assert.equal(errors.length, 1);
   const state = await dependencies.store.read();
   assert.deepEqual(state.reminderRuns, {
       '2026-07-14': {
-        owner: {}, leader: { 'ou_l:1/1': 'sent' }, consent: { ou_a: 'sent' },
+        owner: {}, leader: { 'ou_l:1/1': 'sent' }, consent: {},
       },
   });
   assert.deepEqual(state.confirmations, {});
 });
 
-test('uses one-shot timers and recalculates the next 18:00 run after execution', async () => {
+test('uses independent one-shot timers for 18:00 review and 09:30 start prompts', async () => {
   const { dependencies, timers } = await fixture();
   const scheduler = createReminderScheduler(dependencies);
 
   scheduler.start();
-  assert.equal(timers.length, 1);
+  assert.equal(timers.length, 2);
   assert.equal(timers[0].delay, 3_600_000);
   await timers[0].callback();
-  assert.equal(timers.length, 2);
+  assert.equal(timers.length, 3);
   scheduler.stop();
   assert.equal(timers[1].cleared, true);
+  assert.equal(timers[2].cleared, true);
 });
 
 test('logs a whole-run timer failure without rejecting and still schedules the next run', async () => {
@@ -113,7 +115,55 @@ test('logs a whole-run timer failure without rejecting and still schedules the n
   await assert.doesNotReject(() => timers[0].callback());
   assert.equal(errors.length, 1);
   assert.match(errors[0][0], /run failed/i);
-  assert.equal(timers.length, 2);
+  assert.equal(timers.length, 3);
+});
+
+test('sends a 09:30 start-task picker only to owners without active tasks', async () => {
+  const candidates = [
+    { recordId: 'todo-a', name: '任务A', ownerOpenId: 'ou_a', status: '未开始', start: undefined, priority: 'P0' },
+    { recordId: 'todo-b', name: '任务B', ownerOpenId: 'ou_b', status: '未开始', start: undefined },
+    { recordId: 'doing-b', name: '进行中', ownerOpenId: 'ou_b', status: '进行中' },
+    { recordId: 'dated-c', name: '已有开始时间', ownerOpenId: 'ou_c', status: '未开始', start: 1 },
+  ];
+  const { dependencies, sent } = await fixture({ base: { async listTasks() { return candidates; } } });
+  const scheduler = createReminderScheduler(dependencies);
+  await scheduler.runStartTaskPrompts(new Date('2026-07-14T01:30:00Z'));
+  await scheduler.runStartTaskPrompts(new Date('2026-07-14T01:30:00Z'));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].openId, 'ou_a');
+  assert.match(JSON.stringify(sent[0].card), /任务A/);
+});
+
+test('starts the selected task through transition cards and sets 18:30 deadline', async () => {
+  const calls = [];
+  const startable = { recordId: 'todo-a', name: '任务A', ownerOpenId: 'ou_a', status: '未开始' };
+  const { dependencies, sent } = await fixture({
+    clock: () => new Date('2026-07-16T01:40:00Z'),
+    base: { async listTasks() { return [startable]; } },
+    taskService: {
+      async prepare(intent, actor) { calls.push(['prepare', intent, actor]); return { kind: 'confirmation', confirmationId: 'cfm-start' }; },
+      async confirm(id, actor) { calls.push(['confirm', id, actor]); return { kind: 'result', text: '操作成功。' }; },
+    },
+  });
+  const scheduler = createReminderScheduler(dependencies);
+  await scheduler.handleCardAction({
+    operator: { open_id: 'ou_a' }, context: { open_message_id: 'om_picker' },
+    action: { value: { action: 'select_start_task', taskId: 'todo-a' } },
+  });
+  assert.match(JSON.stringify(sent[0].card), /正在准备开始任务/);
+  assert.match(JSON.stringify(sent[1].card), /submit_start_task__todo-a/);
+
+  await scheduler.handleCardAction({
+    operator: { open_id: 'ou_a' }, context: { open_message_id: 'om_deadline' },
+    action: { name: 'submit_start_task__todo-a', form_value: { deadline_date: '2026-07-17 +0800' } },
+  });
+  assert.match(JSON.stringify(sent[2].card), /正在启动任务/);
+  assert.deepEqual(calls[0], ['prepare', {
+    operation: 'update_task', selector: { recordId: 'todo-a' },
+    fields: { 状态: '进行中', 开始日期: Date.parse('2026-07-16T09:40:00+08:00'), 截止日期: Date.parse('2026-07-17T18:30:00+08:00') },
+  }, 'ou_a']);
+  assert.deepEqual(calls[1], ['confirm', 'cfm-start', 'ou_a']);
+  assert.match(JSON.stringify(sent[3].card), /操作成功/);
 });
 
 test('confirms complete while continue leaves the task unchanged', async () => {
@@ -141,10 +191,12 @@ test('confirms complete while continue leaves the task unchanged', async () => {
     ['confirm', 'cfm-1', 'ou_a'],
     ['get'],
   ]);
-  assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0].type, 'update');
-  assert.deepEqual(sent[0].token, 'token-complete');
-  assert.match(JSON.stringify(sent[0].card), /任务操作已确认/);
+  assert.equal(sent.length, 2);
+  assert.equal(sent.every(({ type }) => type === 'update'), true);
+  assert.equal(sent[0].token, 'token-complete');
+  assert.match(JSON.stringify(sent[0].card), /正在完成任务/);
+  assert.equal(sent[1].token, 'token-complete');
+  assert.match(JSON.stringify(sent[1].card), /任务操作已确认/);
 
   calls.length = 0;
   assert.deepEqual(await scheduler.handleCardAction({
@@ -153,6 +205,10 @@ test('confirms complete while continue leaves the task unchanged', async () => {
     action: { value: { ...ownerEvent.action.value, action: 'continue' } },
   }), { kind: 'result', text: '已继续处理，任务状态未修改。' });
   assert.deepEqual(calls, [['get']]);
+  assert.equal(sent[2].messageId, 'om_continue');
+  assert.match(JSON.stringify(sent[2].card), /正在确认继续处理/);
+  assert.equal(sent[3].messageId, 'om_continue');
+  assert.match(JSON.stringify(sent[3].card), /已继续处理/);
 });
 
 test('rejects non-owners without preparing, confirming, or messaging', async () => {
@@ -205,12 +261,17 @@ test('sends reason forms for block and postpone without writing immediately', as
     });
   }
 
-  assert.equal(sent.length, 2);
-  assert.equal(sent.every(({ type }) => type === 'card'), true);
-  assert.match(JSON.stringify(sent[0].card), /submit_reason__block__rec1/);
-  assert.match(JSON.stringify(sent[1].card), /submit_reason__postpone__rec1/);
-  assert.match(sent[0].uuid, /om_block.*block.*rec1/);
-  assert.match(sent[1].uuid, /om_postpone.*postpone.*rec1/);
+  assert.equal(sent.filter(({ type }) => type === 'card').length, 2);
+  assert.equal(sent.filter(({ type }) => type === 'update').length, 4);
+  const forms = sent.filter(({ type }) => type === 'card');
+  assert.match(JSON.stringify(forms[0].card), /submit_reason__block__rec1/);
+  assert.match(JSON.stringify(forms[1].card), /submit_reason__postpone__rec1/);
+  assert.match(forms[0].uuid, /om_block.*block.*rec1/);
+  assert.match(forms[1].uuid, /om_postpone.*postpone.*rec1/);
+  assert.match(JSON.stringify(sent[0].card), /正在填写阻塞原因/);
+  assert.match(JSON.stringify(sent[2].card), /请填写阻塞原因/);
+  assert.match(JSON.stringify(sent[3].card), /正在填写延期原因/);
+  assert.match(JSON.stringify(sent[5].card), /请填写延期原因/);
 });
 
 test('submitting a reason writes blocked or postponed status and updates the form card', async () => {
@@ -236,7 +297,11 @@ test('submitting a reason writes blocked or postponed status and updates the for
     { 状态: '已延期', 阻塞原因: '等待接口' },
   ]);
   assert.equal(calls.filter(([type]) => type === 'confirm').length, 2);
-  assert.deepEqual(sent.filter(({ type }) => type === 'update').map(({ token }) => token), ['token-block', 'token-postpone']);
+  assert.deepEqual(sent.filter(({ type }) => type === 'update').map(({ token }) => token), [
+    'token-block', 'token-block', 'token-postpone', 'token-postpone',
+  ]);
+  assert.match(JSON.stringify(sent[0].card), /正在更新任务状态/);
+  assert.match(JSON.stringify(sent[1].card), /任务操作已确认/);
 });
 
 test('releases a failed callback claim so the same event can retry', async () => {
@@ -313,7 +378,7 @@ test('persists split cards independently and restart retries only the failed par
 
   assert.equal(attempts.filter((uuid) => uuid === 'owner:2026-07-14:ou_a:1/2').length, 2);
   assert.equal(attempts.filter((uuid) => uuid === 'owner:2026-07-14:ou_a:2/2').length, 1);
-  assert.equal(attempts.filter((uuid) => uuid.startsWith('consent:')).length, 1);
+  assert.equal(attempts.filter((uuid) => uuid.startsWith('consent:')).length, 0);
   assert.deepEqual((await dependencies.store.read()).reminderRuns['2026-07-14'].owner, {
     'ou_a:1/2': 'sent', 'ou_a:2/2': 'sent',
   });
@@ -342,7 +407,7 @@ test('isolates oversized recipient card construction and continues later recipie
   const result = await createReminderScheduler(dependencies).runNow(NOW);
 
   assert.deepEqual(result.recipientErrors, []);
-  assert.deepEqual(sent.map(({ openId }) => openId), ['ou_big', 'ou_good', 'ou_leader', 'ou_big', 'ou_good']);
+  assert.deepEqual(sent.map(({ openId }) => openId), ['ou_big', 'ou_good', 'ou_leader']);
   const bigCard = sent.find(({ openId, uuid }) => openId === 'ou_big' && uuid.startsWith('owner:')).card;
   assert.ok(Buffer.byteLength(JSON.stringify(bigCard), 'utf8') <= 28 * 1024);
   assert.match(JSON.stringify(bigCard), /…/);
@@ -373,7 +438,7 @@ test('records a recipient card build failure and continues other recipients', as
   assert.equal(result.recipientErrors.length, 1);
   assert.deepEqual(result.recipientErrors[0].category, 'owner');
   assert.deepEqual(result.recipientErrors[0].openId, 'ou_bad');
-  assert.deepEqual(sent.map(({ openId }) => openId), ['ou_good', 'ou_leader', 'ou_bad', 'ou_good']);
+  assert.deepEqual(sent.map(({ openId }) => openId), ['ou_good', 'ou_leader']);
 });
 
 test('restarts from the first daily snapshot even when the plan later changes part count and order', async () => {

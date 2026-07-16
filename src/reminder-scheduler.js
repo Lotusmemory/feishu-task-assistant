@@ -1,12 +1,18 @@
 import { millisecondsUntilNextRun, shanghaiDayWindow } from './date-window.js';
 import {
-  buildConsentCard,
   buildLeaderSummaryCards,
   buildOwnerReminderCards,
+  buildReminderActionProcessingCard,
+  buildReminderActionStatusCard,
   buildReminderReasonCard,
   buildTaskConfirmationResultCard,
+  buildStartTaskPickerCard,
+  buildStartTaskDeadlineCard,
+  buildStartTaskProcessingCard,
   parseCardAction,
   parseReminderReasonAction,
+  parseStartTaskSelectionAction,
+  parseStartTaskFormAction,
 } from './feishu-messenger.js';
 
 const OWNER_ACTIONS = new Set(['complete', 'continue', 'block', 'postpone']);
@@ -26,6 +32,11 @@ function windowFor(date) {
   return { dateKey, window: { startMs: startSeconds * 1000, endMs: endSeconds * 1000 + 999 } };
 }
 
+function deadlineAtShanghai1830(value) {
+  const match = typeof value === 'string' ? value.match(/^(\d{4}-\d{2}-\d{2})(?:\s+[+-]\d{4})?$/) : null;
+  return match ? Date.parse(`${match[1]}T18:30:00+08:00`) : Number.NaN;
+}
+
 export function createReminderScheduler({
   clock = () => new Date(),
   setTimer = setTimeout,
@@ -36,11 +47,11 @@ export function createReminderScheduler({
   base,
   taskService,
   onConsent,
-  consentEnabled = true,
   logger = console,
 }) {
   let running = false;
-  let timer;
+  let reminderTimer;
+  let startTaskTimer;
 
   async function wasSent(dateKey, category, openId) {
     return (await store.read()).reminderRuns?.[dateKey]?.[category]?.[openId] === 'sent';
@@ -155,31 +166,59 @@ export function createReminderScheduler({
         recipientErrors,
       );
     }
-    if (consentEnabled) {
-      for (const owner of plan.owners) {
-        await sendOnce(dateKey, 'consent', owner.openId, owner.openId, () => messenger.sendCard(
-          owner.openId,
-          buildConsentCard(),
-          `consent:${dateKey}:${owner.openId}`,
-        ), recipientErrors);
-      }
-    }
     return { ...plan, recipientErrors };
   }
 
-  function schedule() {
+  async function runStartTaskPrompts(at = clock()) {
+    const { dateKey } = windowFor(asDate(at));
+    const tasks = await base.listTasks();
+    const activeOwners = new Set(tasks.filter((task) => task.status === '进行中').map((task) => task.ownerOpenId));
+    const candidatesByOwner = new Map();
+    for (const task of tasks) {
+      if (!task.ownerOpenId || task.status !== '未开始' || task.start || activeOwners.has(task.ownerOpenId)) continue;
+      const candidates = candidatesByOwner.get(task.ownerOpenId) || [];
+      candidates.push(task);
+      candidatesByOwner.set(task.ownerOpenId, candidates);
+    }
+    const recipientErrors = [];
+    for (const [openId, candidates] of candidatesByOwner) {
+      await sendOnce(
+        dateKey, 'startTask', openId, openId,
+        () => messenger.sendCard(openId, buildStartTaskPickerCard(candidates), `start-task:${dateKey}:${openId}`),
+        recipientErrors,
+      );
+    }
+    return { candidatesByOwner, recipientErrors };
+  }
+
+  function scheduleReminder() {
     if (!running) return;
     const now = asDate(clock());
-    timer = setTimer(async () => {
-      timer = undefined;
+    reminderTimer = setTimer(async () => {
+      reminderTimer = undefined;
       try {
         await runNow(clock());
       } catch (error) {
         logger.error('Reminder run failed', { error });
       } finally {
-        schedule();
+        scheduleReminder();
       }
     }, millisecondsUntilNextRun(now, 18));
+  }
+
+  function scheduleStartTaskPrompt() {
+    if (!running) return;
+    const now = asDate(clock());
+    startTaskTimer = setTimer(async () => {
+      startTaskTimer = undefined;
+      try {
+        await runStartTaskPrompts(clock());
+      } catch (error) {
+        logger.error('Start task prompt run failed', { error });
+      } finally {
+        scheduleStartTaskPrompt();
+      }
+    }, millisecondsUntilNextRun(now, 9, 30));
   }
 
   async function claim(key) {
@@ -204,22 +243,102 @@ export function createReminderScheduler({
     });
   }
 
+  async function updateActionCard(event, card) {
+    const messageId = event?.context?.open_message_id || event?.open_message_id;
+    if (typeof event?.token === 'string' && event.token && typeof messenger.updateCardByToken === 'function') {
+      await messenger.updateCardByToken(event.token, card);
+      return;
+    }
+    if (typeof messageId === 'string' && messageId && typeof messenger.updateCard === 'function') {
+      await messenger.updateCard(messageId, card);
+    }
+  }
+
   async function handleCardAction(event) {
+    const startSelection = parseStartTaskSelectionAction(event);
+    if (startSelection) {
+      const messageId = event?.context?.open_message_id || event?.open_message_id;
+      const key = `${messageId}:select_start_task:${startSelection.actorOpenId}`;
+      if (!await claim(key)) return { kind: 'ignored', reason: 'duplicate' };
+      try {
+        await updateActionCard(event, buildStartTaskProcessingCard('正在准备开始任务'));
+        const tasks = await base.listTasks();
+        const task = tasks.find((item) => item.recordId === startSelection.taskId);
+        const valid = task && task.ownerOpenId === startSelection.actorOpenId && task.status === '未开始' && !task.start;
+        const hasActive = tasks.some((item) => item.ownerOpenId === startSelection.actorOpenId && item.status === '进行中');
+        if (!valid || hasActive) {
+          await finish(key, true);
+          await updateActionCard(event, buildTaskConfirmationResultCard(hasActive ? '你已有进行中的任务，本次不再启动新任务。' : '任务已发生变化，请重新操作。'));
+          return { kind: 'ignored', reason: 'stale' };
+        }
+        await finish(key, true);
+        await updateActionCard(event, buildStartTaskDeadlineCard(task));
+        return { kind: 'result', text: '请选择截止日期。' };
+      } catch (error) {
+        await finish(key, false);
+        await updateActionCard(event, buildTaskConfirmationResultCard('加载失败，请稍后重试。')).catch(() => {});
+        throw error;
+      }
+    }
+
+    const startForm = parseStartTaskFormAction(event);
+    if (startForm) {
+      const messageId = event?.context?.open_message_id || event?.open_message_id;
+      const key = `${messageId}:submit_start_task:${startForm.taskId}:${startForm.actorOpenId}`;
+      if (!await claim(key)) return { kind: 'ignored', reason: 'duplicate' };
+      const now = asDate(clock()).getTime();
+      const deadline = deadlineAtShanghai1830(startForm.deadlineDate);
+      try {
+        await updateActionCard(event, buildStartTaskProcessingCard('正在启动任务'));
+        if (!Number.isFinite(deadline) || deadline <= now) throw new Error('Selected deadline is not in the future');
+        const tasks = await base.listTasks();
+        const task = tasks.find((item) => item.recordId === startForm.taskId);
+        const valid = task && task.ownerOpenId === startForm.actorOpenId && task.status === '未开始' && !task.start;
+        const hasActive = tasks.some((item) => item.ownerOpenId === startForm.actorOpenId && item.status === '进行中');
+        if (!valid || hasActive) throw new Error('Task is no longer startable');
+        const prepared = await taskService.prepare({
+          operation: 'update_task', selector: { recordId: task.recordId },
+          fields: { 状态: '进行中', 开始日期: now, 截止日期: deadline },
+        }, startForm.actorOpenId);
+        if (prepared?.kind !== 'confirmation') throw new Error('Start task did not produce a confirmation');
+        const result = await taskService.confirm(prepared.confirmationId, startForm.actorOpenId);
+        await finish(key, true);
+        await updateActionCard(event, buildTaskConfirmationResultCard(result.text || '任务已开始。'));
+        return result;
+      } catch (error) {
+        await finish(key, false);
+        const text = error.message === 'Selected deadline is not in the future'
+          ? '截止日期无效，请重新选择未来日期。'
+          : '启动失败，任务可能已发生变化，请重新操作。';
+        await updateActionCard(event, buildTaskConfirmationResultCard(text)).catch(() => {});
+        throw error;
+      }
+    }
+
     const reasonAction = parseReminderReasonAction(event);
     if (reasonAction) {
       const task = await base?.getTask(reasonAction.taskId);
       if (!task || task.ownerOpenId !== reasonAction.actorOpenId) return { kind: 'ignored', reason: 'forbidden' };
-      const status = reasonAction.action === 'block' ? '阻塞中' : '已延期';
-      const prepared = await taskService.prepare({
-        operation: 'update_task', selector: { recordId: reasonAction.taskId },
-        fields: { 状态: status, 阻塞原因: reasonAction.reason },
-      }, reasonAction.actorOpenId);
-      if (prepared?.kind !== 'confirmation') throw new Error('Task reason action did not produce a confirmation');
-      const result = await taskService.confirm(prepared.confirmationId, reasonAction.actorOpenId);
-      if (typeof event?.token === 'string' && event.token) {
-        await messenger.updateCardByToken(event.token, buildTaskConfirmationResultCard('操作成功。'));
+      try {
+        await updateActionCard(event, buildReminderActionStatusCard(
+          '正在更新任务状态',
+          `正在保存“${task.name || '未命名任务'}”的原因，请稍候…`,
+        ));
+        const status = reasonAction.action === 'block' ? '阻塞中' : '已延期';
+        const prepared = await taskService.prepare({
+          operation: 'update_task', selector: { recordId: reasonAction.taskId },
+          fields: { 状态: status, 阻塞原因: reasonAction.reason },
+        }, reasonAction.actorOpenId);
+        if (prepared?.kind !== 'confirmation') throw new Error('Task reason action did not produce a confirmation');
+        const result = await taskService.confirm(prepared.confirmationId, reasonAction.actorOpenId);
+        await updateActionCard(event, buildTaskConfirmationResultCard('操作成功。'));
+        return result;
+      } catch (error) {
+        await updateActionCard(event, buildTaskConfirmationResultCard('操作失败，请稍后重试。')).catch((updateError) => {
+          logger.error('Reminder reason failure card update failed', { error: updateError });
+        });
+        throw error;
       }
-      return result;
     }
 
     const parsed = parseCardAction(event);
@@ -238,8 +357,15 @@ export function createReminderScheduler({
     if (!await claim(key)) return { kind: 'ignored', reason: 'duplicate' };
 
     try {
+      await updateActionCard(event, buildReminderActionProcessingCard(task, parsed.action));
+
       if (parsed.action === 'continue') {
         await finish(key, true);
+        await updateActionCard(event, buildReminderActionStatusCard(
+          '已继续处理',
+          '任务状态未修改。',
+          { template: 'green' },
+        ));
         return { kind: 'result', text: '已继续处理，任务状态未修改。' };
       }
 
@@ -250,6 +376,11 @@ export function createReminderScheduler({
           `callback-reason:${messageId}:${parsed.action}:${parsed.taskId}:${parsed.actorOpenId}`,
         );
         await finish(key, true);
+        const reasonName = parsed.action === 'block' ? '阻塞原因' : '延期原因';
+        await updateActionCard(event, buildReminderActionStatusCard(
+          `请填写${reasonName}`,
+          '原因填写卡片已发送，请在新卡片中提交。',
+        ));
         return { kind: 'result', text: '请填写原因。' };
       }
 
@@ -266,6 +397,7 @@ export function createReminderScheduler({
       const currentTask = await base.getTask(parsed.taskId);
       if (!currentTask || currentTask.ownerOpenId !== parsed.actorOpenId) {
         await finish(key, false);
+        await updateActionCard(event, buildTaskConfirmationResultCard('任务已变更，请重新操作。'));
         return { kind: 'ignored', reason: 'forbidden' };
       }
       const confirmed = await taskService.confirm(result.confirmationId, parsed.actorOpenId);
@@ -278,14 +410,24 @@ export function createReminderScheduler({
       return confirmed;
     } catch (error) {
       await finish(key, false);
+      await updateActionCard(event, buildTaskConfirmationResultCard('操作失败，请稍后重试。')).catch((updateError) => {
+        logger.error('Reminder action failure card update failed', { error: updateError });
+      });
       throw error;
     }
   }
 
   return {
-    start() { if (!running) { running = true; schedule(); } },
-    stop() { running = false; if (timer !== undefined) clearTimer(timer); timer = undefined; },
+    start() { if (!running) { running = true; scheduleReminder(); scheduleStartTaskPrompt(); } },
+    stop() {
+      running = false;
+      if (reminderTimer !== undefined) clearTimer(reminderTimer);
+      if (startTaskTimer !== undefined) clearTimer(startTaskTimer);
+      reminderTimer = undefined;
+      startTaskTimer = undefined;
+    },
     runNow,
+    runStartTaskPrompts,
     handleCardAction,
   };
 }

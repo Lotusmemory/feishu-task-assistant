@@ -56,7 +56,7 @@ test('runs task confirmation, idempotent reminders and authorized chat draft con
   const at = new Date('2026-07-15T18:00:00+08:00');
   await scheduler.runNow(at);
   await scheduler.runNow(at);
-  assert.equal(sent.filter((item) => item.openId === 'ou_owner').length, 2); // owner + consent
+  assert.equal(sent.filter((item) => item.openId === 'ou_owner').length, 1);
   assert.equal(sent.filter((item) => item.openId === 'ou_leader').length, 1);
   assert.doesNotMatch(JSON.stringify(sent.find((item) => item.openId === 'ou_leader').card), /button|callback/);
 
@@ -96,7 +96,7 @@ test('runs task confirmation, idempotent reminders and authorized chat draft con
   assert.equal(writes.length, 2);
 });
 
-test('does not send chat consent cards when chat summaries are disabled', async () => {
+test('does not proactively send chat consent cards', async () => {
   const sent = [];
   const scheduler = createReminderScheduler({
     store: memoryStore(),
@@ -105,7 +105,6 @@ test('does not send chat consent cards when chat summaries are disabled', async 
       leaders: [], warnings: [],
     }; } },
     messenger: { async sendCard(openId, card) { sent.push({ openId, card }); } },
-    consentEnabled: false,
   });
   await scheduler.runNow(new Date('2026-07-15T18:00:00+08:00'));
   assert.equal(sent.length, 1);

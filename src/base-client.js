@@ -27,6 +27,7 @@ function mapTask({ record_id: recordId, fields }) {
     blocker: textValue(fields['阻塞原因']),
   };
   if (fields['开始日期'] !== undefined) task.start = fields['开始日期'];
+  if (fields['完成时间'] !== undefined) task.completionTime = fields['完成时间'];
   if (Array.isArray(fields['标签'])) task.tags = fields['标签'];
   return task;
 }
@@ -140,6 +141,12 @@ export function createBaseClient({
       return (await listTaskRecords('List due tasks')).filter((task) => task.ownerOpenId
         && Number(task.deadline) >= startMs && Number(task.deadline) <= endMs
         && task.status !== '已完成');
+    },
+
+    async listLeaderReportTasks({ startMs, endMs }) {
+      return (await listTaskRecords('List leader report tasks')).filter((task) => task.ownerOpenId
+        && (task.status === '进行中' || (task.status === '已完成'
+          && Number(task.completionTime) >= startMs && Number(task.completionTime) <= endMs)));
     },
 
     async listTasks() {

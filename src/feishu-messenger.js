@@ -41,7 +41,10 @@ function taskMarkdown(task, ownerName) {
   const deadline = task.deadline ? new Date(task.deadline).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未设置';
   const status = truncateText(task.status || '未设置', 100);
   const blocker = truncateText(task.blocker || '无', 1_000);
-  return `**${name}**${owner}\n状态：${status}\n截止时间：${deadline}\n阻塞原因：${blocker}`;
+  const completion = task.status === '已完成' && task.completionTime
+    ? `\n完成时间：${new Date(task.completionTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
+    : '';
+  return `**${name}**${owner}\n状态：${status}\n截止时间：${deadline}${completion}\n阻塞原因：${blocker}`;
 }
 
 export function countTaggedComponents(value) {
@@ -105,15 +108,43 @@ export function buildOwnerReminderCards(owner, dateKey) {
 }
 
 export function buildLeaderSummaryCard(leader) {
+  const entries = leader.owners.flatMap((owner) => owner.tasks.map((task) => ({ owner, task })));
+  const sections = [
+    ['进行中', entries.filter(({ task }) => task.status === '进行中')],
+    ['今日完成', entries.filter(({ task }) => task.status === '已完成')],
+  ].filter(([, tasks]) => tasks.length > 0);
   return {
     schema: '2.0',
     config: { width_mode: 'default' },
-    header: { template: 'blue', title: plainText('今日截止未完成任务') },
+    header: {
+      template: 'blue',
+      title: plainText('每日任务汇报'),
+      icon: { tag: 'standard_icon', token: 'todo_colorful' },
+      text_tag_list: [{ tag: 'text_tag', text: plainText('只读'), color: 'blue' }],
+    },
     body: {
-      elements: leader.owners.flatMap((owner) => owner.tasks.map((task) => ({
-        tag: 'markdown',
-        content: taskMarkdown(task, owner.name),
-      }))),
+      direction: 'vertical',
+      padding: '12px 12px 20px 12px',
+      vertical_spacing: '12px',
+      elements: [
+        { tag: 'markdown', content: `**共汇报 ${entries.length} 项任务**`, text_size: 'heading-4' },
+        ...sections.map(([title, tasks]) => ({
+          tag: 'column_set',
+          flex_mode: 'none',
+          columns: [{
+            tag: 'column',
+            width: 'weighted',
+            weight: 1,
+            background_style: title === '今日完成' ? 'violet-50' : 'blue-50',
+            padding: '12px',
+            vertical_spacing: '8px',
+            elements: [
+              { tag: 'markdown', content: `**${title}（${tasks.length}）**` },
+              ...tasks.map(({ owner, task }) => ({ tag: 'markdown', content: taskMarkdown(task, owner.name) })),
+            ],
+          }],
+        })),
+      ],
     },
   };
 }

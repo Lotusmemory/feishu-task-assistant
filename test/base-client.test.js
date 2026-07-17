@@ -57,6 +57,35 @@ test('lists due tasks across pages and maps only required fields', async () => {
   });
 });
 
+test('lists all ongoing tasks and only tasks completed inside the leader report window', async () => {
+  const startMs = 1783958400000;
+  const endMs = 1784044799999;
+  const records = [
+    { record_id: 'doing', fields: {
+      任务名: '进行中任务', 负责人: [{ id: 'ou_owner', name: '张三' }], 状态: '进行中',
+      截止日期: startMs - 86_400_000,
+    } },
+    { record_id: 'done-today', fields: {
+      任务名: '今日完成', 负责人: [{ id: 'ou_owner', name: '张三' }], 状态: '已完成', 完成时间: startMs + 1,
+    } },
+    { record_id: 'done-before', fields: {
+      任务名: '历史完成', 负责人: [{ id: 'ou_owner', name: '张三' }], 状态: '已完成', 完成时间: startMs - 1,
+    } },
+    { record_id: 'not-started', fields: {
+      任务名: '未开始', 负责人: [{ id: 'ou_owner', name: '张三' }], 状态: '未开始',
+    } },
+  ];
+  const client = { bitable: { v1: { appTableRecord: { async list() {
+    return { code: 0, data: { has_more: false, items: records } };
+  } } } } };
+  const base = createBaseClient({ client, baseToken: 'bas', tasksTableId: 'tbl_tasks' });
+
+  const tasks = await base.listLeaderReportTasks({ startMs, endMs });
+
+  assert.deepEqual(tasks.map(({ recordId }) => recordId), ['doing', 'done-today']);
+  assert.equal(tasks[1].completionTime, startMs + 1);
+});
+
 test('searches tasks by name and owner open id', async () => {
   let payload;
   const client = { bitable: { v1: { appTableRecord: { list: async (value) => {

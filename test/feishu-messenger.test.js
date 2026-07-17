@@ -368,23 +368,33 @@ test('splits owner tasks without exceeding component and UTF-8 byte limits', () 
 test('builds a blue read-only leader card without interactive fields', () => {
   const card = buildLeaderSummaryCard({
     openId: 'ou_l',
-    owners: [{ openId: 'ou_a', name: '张三', tasks: [{
-      recordId: 'rec1', name: '首页设计', status: '已阻塞', deadline: 1_784_041_200_000, blocker: '等待接口',
-    }] }],
+    owners: [{ openId: 'ou_a', name: '张三', tasks: [
+      {
+        recordId: 'rec1', name: '首页设计', status: '进行中', deadline: 1_784_041_200_000,
+        completionTime: 1_784_040_000_000, blocker: '等待接口',
+      },
+      { recordId: 'rec2', name: '接口联调', status: '已完成', completionTime: 1_784_043_000_000 },
+    ] }],
   });
   const serialized = JSON.stringify(card);
 
   assert.equal(card.header.template, 'blue');
+  assert.equal(card.header.title.content, '每日任务汇报');
+  assert.equal(card.header.icon.token, 'todo_colorful');
+  assert.match(serialized, /进行中（1）/);
+  assert.match(serialized, /今日完成（1）/);
   assert.match(serialized, /张三/);
   assert.match(serialized, /首页设计/);
-  assert.match(serialized, /已阻塞/);
+  assert.match(serialized, /接口联调/);
   assert.match(serialized, /等待接口/);
+  assert.match(serialized, /完成时间/);
+  assert.equal(serialized.match(/完成时间/g)?.length, 1);
   assert.doesNotMatch(serialized, /"(?:button|behaviors|action)"/);
 });
 
 test('splits large leader summaries on complete owner/task entries', () => {
   const tasks = Array.from({ length: 10 }, (_, index) => ({
-    recordId: `rec${index}`, name: `任务${index}`, status: '已阻塞', deadline: 1_784_041_200_000,
+    recordId: `rec${index}`, name: `任务${index}`, status: '进行中', deadline: 1_784_041_200_000,
     blocker: `阻塞${index}${'很长'.repeat(2_000)}`,
   }));
   const cards = buildLeaderSummaryCards({
@@ -392,7 +402,8 @@ test('splits large leader summaries on complete owner/task entries', () => {
   });
 
   assert.ok(cards.length > 1);
-  assert.equal(cards.reduce((total, card) => total + card.body.elements.length, 0), 10);
+  assert.equal(cards.reduce((total, card) => total
+    + (JSON.stringify(card).match(/\*\*任务\d+/g)?.length || 0), 0), 10);
   for (const card of cards) {
     assert.ok(countTaggedComponents(card) <= 190);
     assert.ok(Buffer.byteLength(JSON.stringify(card), 'utf8') <= 28 * 1024);

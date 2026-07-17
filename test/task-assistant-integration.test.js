@@ -23,6 +23,7 @@ test('runs task confirmation, idempotent reminders and authorized chat draft con
     async searchTasks() { return []; },
     async createTask(fields) { writes.push(structuredClone(fields)); return { record_id: `r${writes.length}` }; },
     async listDueTasks() { return tasks; },
+    async listLeaderReportTasks() { return tasks; },
     async listMembers() { return [
       { openId: 'ou_owner', name: '负责人', leaderOpenIds: ['ou_leader'] },
       { openId: 'ou_leader', name: 'Leader', leaderOpenIds: [] },

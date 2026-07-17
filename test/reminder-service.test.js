@@ -26,6 +26,9 @@ test('builds stable owner reminders and read-only leader summaries', async () =>
     task({ recordId: 'r-a-1', name: '任务甲', ownerOpenId: 'ou_a', ownerName: '旧姓名', priority: 'P1', deadline: 200 }),
   ];
   const completedTask = task({ recordId: 'r-done', name: '已完成任务', status: '已完成' });
+  const activeOutsideDueWindow = task({
+    recordId: 'r-active', name: '非今日截止任务', ownerOpenId: 'ou_b', ownerName: '旧姓名', deadline: 900,
+  });
   const memberRows = [
     { openId: 'ou_b', name: 'B负责人', leaderOpenIds: ['ou_shared'] },
     { openId: 'ou_a', name: 'A负责人', leaderOpenIds: ['ou_shared', 'ou_extra'] },
@@ -35,6 +38,9 @@ test('builds stable owner reminders and read-only leader summaries', async () =>
     calls.push(['listDueTasks', receivedWindow]);
     // 模拟 Base 查询过滤；聚合层只消费查询结果，不重复实现状态筛选。
     return [...dueTasks, completedTask].filter((item) => item.status !== '已完成');
+  }, async listLeaderReportTasks(receivedWindow) {
+    calls.push(['listLeaderReportTasks', receivedWindow]);
+    return [activeOutsideDueWindow, completedTask];
   } };
   const members = {
     async refresh() { calls.push(['refresh']); return memberRows; },
@@ -46,6 +52,7 @@ test('builds stable owner reminders and read-only leader summaries', async () =>
   assert.deepEqual(calls, [
     ['refresh'],
     ['listDueTasks', window],
+    ['listLeaderReportTasks', window],
     ['leadersByOwner', 'ou_a'],
     ['leadersByOwner', 'ou_b'],
   ]);
@@ -57,20 +64,21 @@ test('builds stable owner reminders and read-only leader summaries', async () =>
     ],
     leaders: [
       { openId: 'ou_extra', owners: [
-        { openId: 'ou_a', name: 'A负责人', tasks: [dueTasks[3], dueTasks[4], dueTasks[0]] },
+        { openId: 'ou_a', name: 'A负责人', tasks: [completedTask] },
       ] },
       { openId: 'ou_shared', owners: [
-        { openId: 'ou_a', name: 'A负责人', tasks: [dueTasks[3], dueTasks[4], dueTasks[0]] },
-        { openId: 'ou_b', name: 'B负责人', tasks: [dueTasks[2]] },
+        { openId: 'ou_a', name: 'A负责人', tasks: [completedTask] },
+        { openId: 'ou_b', name: 'B负责人', tasks: [activeOutsideDueWindow] },
       ] },
     ],
     warnings: [{ ownerOpenId: 'ou_missing', reason: 'member_not_found' }],
   });
-  assert.equal(JSON.stringify(plan).includes(completedTask.recordId), false);
+  assert.equal(JSON.stringify(plan.owners).includes(completedTask.recordId), false);
+  assert.equal(JSON.stringify(plan.leaders).includes(completedTask.recordId), true);
 });
 
 test('leader plans never contain action or button fields', async () => {
-  const base = { async listDueTasks() {
+  const base = { async listDueTasks() { return []; }, async listLeaderReportTasks() {
     return [task({ recordId: 'r1', action: { type: 'complete' }, button: '确认' })];
   } };
   const members = {
@@ -93,7 +101,7 @@ test('sorts tasks with the documented stable comparator', async () => {
     task({ recordId: 'p0', priority: 'P0' }),
     task({ recordId: 'p1-name-a', name: 'A任务', priority: 'P1', deadline: 200 }),
   ];
-  const base = { async listDueTasks() { return dueTasks; } };
+  const base = { async listDueTasks() { return dueTasks; }, async listLeaderReportTasks() { return []; } };
   const members = {
     async refresh() { return [{ openId: 'ou_a', name: 'A负责人', leaderOpenIds: [] }]; },
     async leadersByOwner() { return []; },
